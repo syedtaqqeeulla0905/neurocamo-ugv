@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NeuroCamo — Spiking Camouflage Detection</title>
+    <meta
+      name="description"
+      content="Upload an image and get a spiking-neural-network camouflage verdict with the layer-3 spike spectrogram."
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <!-- ── control rail ───────────────────────────────────────────── -->
+      <aside class="rail">
+        <div class="brand">
+          <svg width="26" height="14" viewBox="0 0 26 14" aria-hidden="true">
+            <path
+              d="M1 7 L5 7 L7.5 1.5 L10 12.5 L12.5 4 L15 10 L17.5 7 L25 7"
+              fill="none"
+              stroke="#00e5a0"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          <div>
+            <div class="wordmark">NEURO<span>CAMO</span></div>
+            <div class="tag">Spiking camouflage detector</div>
+          </div>
+        </div>
+
+        <div class="field">
+          <span class="pip" id="pip"><i></i><span id="pipText">Booting model</span></span>
+        </div>
+
+        <div class="field">
+          <span class="label">Input source</span>
+          <div class="chips" id="sourceChips">
+            <button class="chip active" type="button" id="srcFileBtn">File upload</button>
+            <button class="chip" type="button" id="srcIpBtn">Phone IP Stream</button>
+          </div>
+        </div>
+
+        <div class="field" id="fileSourceGroup">
+          <span class="label">Input frame</span>
+          <label class="deck" id="deck" for="file">
+            <input id="file" type="file" accept=".jpg,.jpeg,.png,.bmp,.webp" />
+            <div id="deckIdle">
+              <div class="jack"><i></i><i></i><i></i><i></i></div>
+              <div style="font-size: 11px; color: var(--muted2)">
+                Drop an image or click to browse
+              </div>
+              <div class="note">JPG · PNG · BMP · WEBP · up to 25 MB</div>
+            </div>
+            <div id="deckLoaded" class="hidden">
+              <img id="thumb" class="thumb" alt="Selected frame preview" />
+              <div class="filename" id="fname"></div>
+              <div class="note" id="fmeta"></div>
+            </div>
+          </label>
+        </div>
+
+        <div class="field hidden" id="ipSourceGroup">
+          <span class="label">Phone IP Camera URL</span>
+          <input type="text" id="ipUrlInput" class="ip-input" placeholder="http://192.168.1.50:8080/video" value="http://192.168.1.50:8080/video" />
+          
+          <div class="chips" style="margin-top: 6px;">
+            <button class="chip" type="button" id="presetIpVideo">IP Video (/video)</button>
+            <button class="chip" type="button" id="presetIpWebcam">IP Shot (/shot.jpg)</button>
+            <button class="chip" type="button" id="presetDroidCam">DroidCam</button>
+          </div>
+          <div class="note" style="margin-top: 4px;">
+            Install <b>IP Webcam</b> app on Android/iOS, start server & enter URL shown on phone screen (e.g. <code>http://192.168.1.x:8080/video</code>).
+          </div>
+          
+          <button class="run" id="toggleStreamBtn" type="button" style="margin-top: 10px;">Connect Live Camera Feed</button>
+          <button class="ghost" id="detectFrameBtn" type="button" style="margin-top: 8px; width: 100%; text-align: center;" class="hidden">Run SNN Detection on Current Frame</button>
+        </div>
+
+        <div class="field">
+          <span class="label">Sample frames</span>
+          <div class="chips" id="sampleChips">
+            <button class="chip" type="button" data-sample="samples/camo_batfish.jpg">
+              Camouflaged
+            </button>
+            <button class="chip" type="button" data-sample="samples/ordinary_scene.jpg">
+              Ordinary scene
+            </button>
+          </div>
+        </div>
+
+        <div class="field">
+          <span class="label">Spike bands shown</span>
+          <div class="chips" id="bandChips">
+            <button class="chip" type="button" data-band="normal" aria-pressed="true">Sparse</button>
+            <button class="chip" type="button" data-band="stress" aria-pressed="true">Active</button>
+            <button class="chip" type="button" data-band="fault" aria-pressed="true">Saturated</button>
+          </div>
+          <div class="note">
+            Filters the spectrogram colormap by firing density. Hidden bands render grey.
+          </div>
+        </div>
+
+        <button class="run" id="run" type="button" disabled>Run detection</button>
+        <div id="alertSlot"></div>
+        <div id="modelAlert"></div>
+
+        <div class="field">
+          <span class="label">Model</span>
+          <table class="votes">
+            <tbody id="modelMeta">
+              <tr><td>Checkpoint</td><td id="mCkpt">—</td></tr>
+              <tr><td>Device</td><td id="mDev">—</td></tr>
+              <tr><td>Epoch</td><td id="mEpoch">—</td></tr>
+              <tr><td>Val loss</td><td id="mLoss">—</td></tr>
+              <tr><td>Params</td><td id="mParams">—</td></tr>
+              <tr><td>Timesteps</td><td id="mSteps">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </aside>
+
+      <!-- ── stage ──────────────────────────────────────────────────── -->
+      <main class="stage">
+        <section class="idle" id="idle">
+          <div>
+            <h1>See what the eye <span>slides past.</span></h1>
+            <p>
+              NeuroCamo encodes a frame into Poisson spike trains and runs a three-layer
+              spiking CNN over 16 timesteps — the spikes that survive are the ones
+              camouflage cannot suppress.
+            </p>
+            <div class="band-key">
+              <div>
+                <strong style="color: var(--band-normal)">Sparse</strong>
+                <span>Quiet channels — background structure, low spike density</span>
+              </div>
+              <div>
+                <strong style="color: var(--band-stress)">Active</strong>
+                <span>Mid density — texture boundaries and edge candidates</span>
+              </div>
+              <div>
+                <strong style="color: var(--band-fault)">Saturated</strong>
+                <span>Densest firing — the channels driving the verdict</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div id="results" class="hidden">
+          <!-- verdict -->
+          <section class="panel" id="verdictPanel">
+            <div class="eyebrow">Verdict</div>
+            <div class="verdict">
+              <canvas class="dial" id="dial" width="264" height="264"></canvas>
+              <div>
+                <div class="verdict-word" id="verdictWord">—</div>
+                <div class="verdict-sub" id="verdictSub"></div>
+                <dl class="readout" id="readout"></dl>
+              </div>
+            </div>
+          </section>
+
+          <!-- images -->
+          <div class="grid2">
+            <section class="panel" id="inputPanel">
+              <div class="panel-head">
+                <h2 class="sec">Input frame</h2>
+                <span class="tag" id="inMeta"></span>
+              </div>
+              <div class="canvas-wrap"><img id="inImg" alt="Uploaded frame" /></div>
+            </section>
+            <section class="panel" id="detectionPanel">
+              <div class="panel-head">
+                <h2 class="sec">Detection</h2>
+                <span class="tag" id="outMeta"></span>
+              </div>
+              <div class="canvas-wrap"><img id="outImg" alt="Detection result" /></div>
+            </section>
+          </div>
+
+          <!-- spike spectrogram -->
+          <section class="panel" id="specPanel">
+            <div class="panel-head">
+              <h2 class="sec">Layer-3 spike spectrogram</h2>
+              <span class="tag" id="specMeta"></span>
+            </div>
+            <div class="canvas-wrap tall" id="specWrap">
+              <canvas id="spec"></canvas>
+              <div class="probe hidden" id="probe"></div>
+            </div>
+            <div class="legend" id="legend">
+              <button type="button" data-band="normal" aria-pressed="true" style="color: var(--band-normal)">
+                <i></i>Sparse <em>&lt; 33% peak</em>
+              </button>
+              <button type="button" data-band="stress" aria-pressed="true" style="color: var(--band-stress)">
+                <i></i>Active <em>33 – 66%</em>
+              </button>
+              <button type="button" data-band="fault" aria-pressed="true" style="color: var(--band-fault)">
+                <i></i>Saturated <em>&gt; 66% peak</em>
+              </button>
+            </div>
+            <div class="note">
+              Each row is one of the 128 semantic channels; each column is one of the 16
+              Poisson timesteps. Cell brightness is that channel's firing rate over the
+              16×16 spatial grid, normalised to the frame's peak rate.
+            </div>
+          </section>
+
+          <!-- population rate + gate -->
+          <div class="grid2" id="bottomMetricsGrid">
+            <section class="panel">
+              <div class="panel-head">
+                <h2 class="sec">Population firing rate</h2>
+                <span class="tag">t0 → t15</span>
+              </div>
+              <div class="canvas-wrap"><canvas id="rate"></canvas></div>
+              <div class="note">
+                Mean spike rate across all layer-3 neurons at each timestep — the
+                membrane charge-up curve of the network.
+              </div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h2 class="sec">Scene gate</h2>
+                <span class="tag">Pre-verdict filter</span>
+              </div>
+              <div class="meters" id="meters"></div>
+              <table class="votes" style="margin-top: 1.1rem">
+                <thead>
+                  <tr><th>Check</th><th>Reading</th><th>Result</th></tr>
+                </thead>
+                <tbody id="gateRows"></tbody>
+              </table>
+            </section>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

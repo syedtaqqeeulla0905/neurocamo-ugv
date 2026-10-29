@@ -1,0 +1,27 @@
+# Ignore temporary, unnecessary, and client/other project folders
+.claude/
+echolyx-web/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore large virtual environments and datasets
+venv/
+**/venv/
+.venv/
+**/data/
+**/datasets/*.zip
+**/datasets/*.parquet
+*.zip
+*.parquet
+*.mp4
+*.avi
+
+# Ignore massive Windows executable installer
+python-3.11.9-amd64.exe
+
+# Ignore OS / Editor junk
+.DS_Store
+Thumbs.db
+*.tmp
+*.log

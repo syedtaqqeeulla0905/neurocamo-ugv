@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1720" height="1500" viewBox="0 0 1720 1500" font-family="Segoe UI, Arial, sans-serif">
+<style>
+  .bg   { fill:#fbfaf7; }
+  .blk  { fill:#ffffff; stroke:#37474f; stroke-width:2.5; rx:8; }
+  .blkj { fill:#eef4ee; stroke:#2e7d32; stroke-width:3; rx:10; }
+  .blkp { fill:#fdf0ef; stroke:#c62828; stroke-width:2.5; rx:8; }
+  .blkm { fill:#eef3fa; stroke:#1565c0; stroke-width:2.5; rx:8; }
+  .t    { font-size:15px; fill:#263238; }
+  .tb   { font-size:16px; font-weight:bold; fill:#1a2327; }
+  .ts   { font-size:12.5px; fill:#546e7a; }
+  .tp   { font-size:12px; fill:#37474f; font-family:Consolas,monospace; }
+  .w12  { fill:none; stroke:#d32f2f; stroke-width:3.2; }
+  .w5   { fill:none; stroke:#f57c00; stroke-width:3.2; }
+  .wg   { fill:none; stroke:#263238; stroke-width:2.6; }
+  .wd   { fill:none; stroke:#1976d2; stroke-width:2.2; }
+  .wp   { fill:none; stroke:#7b1fa2; stroke-width:2.6; }
+  .wi   { fill:none; stroke:#00897b; stroke-width:2.2; }
+  .wm   { fill:none; stroke:#388e3c; stroke-width:3; }
+  .lbl  { font-size:11.5px; fill:#455a64; font-family:Consolas,monospace; }
+  .warn { font-size:13.5px; fill:#b71c1c; }
+</style>
+<rect class="bg" x="0" y="0" width="1720" height="1500"/>
+<text class="tb" x="40" y="42" font-size="27">NeuroCamo Recon Rover &#8212; Wiring / Interconnect Diagram</text>
+<text class="ts" x="40" y="68" font-size="14.5">Jetson Nano on Tanna TechBiz Eagle-101 carrier &#183; 2WD + caster &#183; IMX219 CSI camera on pan/tilt &#183; SNN detection with PATROL / LOCKED / AUTO-HALT indicators</text>
+
+<!-- ============ 12V TRUNK (drawn under blocks) ============ -->
+<polyline class="w12" points="270,302 300,302 300,130 1160,130 1160,150"/>
+<polyline class="w12" points="300,302 300,600"/>
+<polyline class="w12" points="300,430 270,430"/>
+<polyline class="w12" points="300,570 270,570"/>
+<circle cx="300" cy="302" r="5" fill="#d32f2f"/>
+<circle cx="300" cy="430" r="5" fill="#d32f2f"/>
+<circle cx="300" cy="570" r="5" fill="#d32f2f"/>
+<text class="lbl" x="308" y="205" fill="#d32f2f">+11.1V (VBAT)</text>
+
+<!-- ============ 5V RAILS ============ -->
+<polyline class="w5" points="270,455 350,455 350,660 430,660"/>
+<text class="lbl" x="356" y="640" fill="#f57c00">5V 4A</text>
+<polyline class="w5" points="270,590 370,590 370,980 1240,980 1240,590"/>
+<text class="lbl" x="1000" y="972" fill="#f57c00">5V 3A (servo rail &#8212; separate from Jetson)</text>
+<!-- ============ GROUND (star point) ============ -->
+<polyline class="wg" points="270,470 330,470 330,1030"/>
+<polyline class="wg" points="270,610 350,610 350,1030"/>
+<polyline class="wg" points="500,710 500,1030"/>
+<polyline class="wg" points="1010,375 970,375 970,1030"/>
+<polyline class="wg" points="1010,550 990,550 990,1030"/>
+<polyline class="wg" points="1310,780 1360,780 1360,1030"/>
+<polyline class="wg" points="1310,930 1380,930 1380,1030"/>
+<line x1="100" y1="1030" x2="1500" y2="1030" stroke="#263238" stroke-width="7"/>
+<text class="tb" x="100" y="1058" font-size="14">COMMON GROUND &#8212; single star point (mandatory: motor, servo and Jetson grounds must be tied here)</text>
+
+<!-- ============ L298N CONTROL LINES ============ -->
+<polyline class="wd" points="860,330 900,330 900,180 1010,180"/>
+<polyline class="wd" points="860,360 920,360 920,215 1010,215"/>
+<polyline class="wd" points="860,390 940,390 940,250 1010,250"/>
+<polyline class="wd" points="860,420 960,420 960,285 1010,285"/>
+<polyline class="wp" points="860,450 980,450 980,320 1010,320"/>
+<polyline class="wp" points="860,480 1000,480 1000,355 1010,355"/>
+
+<!-- ============ I2C / 3V3 to PCA9685 ============ -->
+<polyline class="w5" points="860,200 866,200 866,460 1010,460" stroke="#e65100" stroke-width="2.2"/>
+<polyline class="wi" points="860,230 874,230 874,490 1010,490"/>
+<polyline class="wi" points="860,260 882,260 882,520 1010,520"/>
+<polyline class="wg" points="860,290 890,290 890,550 1010,550" stroke-width="2.2"/>
+
+<!-- ============ INDICATORS ============ -->
+<polyline class="wd" points="860,520 900,520 900,660 1010,660"/>
+<polyline class="wd" points="860,550 915,550 915,700 1010,700"/>
+<polyline class="wd" points="860,580 930,580 930,740 1010,740"/>
+<polyline class="wd" points="860,610 945,610 945,880 1010,880"/>
+
+<!-- ============ CSI RIBBON + MOTOR / SERVO OUTPUTS ============ -->
+<line x1="700" y1="710" x2="700" y2="760" stroke="#6d4c41" stroke-width="9"/>
+<text class="lbl" x="710" y="742" fill="#6d4c41">15-pin FFC</text>
+<polyline class="wm" points="1310,200 1420,180"/>
+<polyline class="wm" points="1310,230 1420,210"/>
+<polyline class="wm" points="1310,290 1420,290"/>
+<polyline class="wm" points="1310,320 1420,320"/>
+<polyline class="wp" points="1310,470 1420,470"/>
+<polyline class="wp" points="1310,510 1420,550"/>
+<!-- ============ POWER COLUMN ============ -->
+<rect class="blkp" x="40" y="150" width="230" height="86"/>
+<text class="tb" x="56" y="178">Battery 3S Li-ion</text>
+<text class="t"  x="56" y="200">11.1V nominal, &#8805;3000mAh</text>
+<text class="ts" x="56" y="222">XT60 + 5A blade fuse</text>
+
+<rect class="blkp" x="40" y="270" width="230" height="64"/>
+<text class="tb" x="56" y="297">Master switch + fuse</text>
+<text class="ts" x="56" y="320">kills all rails at once</text>
+
+<rect class="blk" x="40" y="380" width="230" height="100"/>
+<text class="tb" x="56" y="408">Buck #1 &#8212; 5V / 4A</text>
+<text class="t"  x="56" y="430">to Eagle-101 DC input</text>
+<text class="ts" x="56" y="452">verify Eagle DC range first:</text>
+<text class="ts" x="56" y="470">many accept 11.1V direct</text>
+
+<rect class="blk" x="40" y="520" width="230" height="100"/>
+<text class="tb" x="56" y="548">Buck #2 &#8212; 5V / 3A</text>
+<text class="t"  x="56" y="570">servo rail ONLY</text>
+<text class="ts" x="56" y="592">isolates servo stall current</text>
+<text class="ts" x="56" y="610">from the compute rail</text>
+
+<!-- ============ JETSON / EAGLE-101 ============ -->
+<rect class="blkj" x="430" y="150" width="430" height="560"/>
+<text class="tb" x="450" y="182" font-size="19">Jetson Nano 4GB module</text>
+<text class="t"  x="450" y="206">on Eagle-101 carrier board</text>
+<text class="ts" x="450" y="228">JetPack 4.6.x &#183; CUDA 10.2</text>
+<text class="ts" x="450" y="248">runs the SNN: Poisson T=16</text>
+<text class="ts" x="450" y="268">&#8594; 3-layer SCNN &#8594; ASAB</text>
+<text class="ts" x="450" y="288">&#8594; bbox + conf + 12 classes</text>
+<text class="ts" x="450" y="316" fill="#b71c1c">flash with Tanna BSP,</text>
+<text class="ts" x="450" y="334" fill="#b71c1c">NOT the NVIDIA SD image</text>
+<text class="lbl" x="450" y="640">DC IN &#9664;</text>
+<text class="lbl" x="620" y="700">CSI-0</text>
+<text class="tb" x="690" y="182" font-size="13">40-PIN HEADER</text>
+<line x1="680" y1="190" x2="856" y2="190" stroke="#2e7d32" stroke-width="1.5"/>
+<text class="tp" x="686" y="205">pin 1  3.3V</text>
+<text class="tp" x="686" y="235">pin 3  SDA</text>
+<text class="tp" x="686" y="265">pin 5  SCL</text>
+<text class="tp" x="686" y="295">pin 9  GND</text>
+<text class="tp" x="686" y="335">pin 11 IN1</text>
+<text class="tp" x="686" y="365">pin 13 IN2</text>
+<text class="tp" x="686" y="395">pin 29 IN3</text>
+<text class="tp" x="686" y="425">pin 31 IN4</text>
+<text class="tp" x="686" y="455" fill="#7b1fa2">pin 32 PWM0</text>
+<text class="tp" x="686" y="485" fill="#7b1fa2">pin 33 PWM2</text>
+<text class="tp" x="686" y="525">pin 15 LED-G</text>
+<text class="tp" x="686" y="555">pin 35 LED-A</text>
+<text class="tp" x="686" y="585">pin 37 LED-R</text>
+<text class="tp" x="686" y="615">pin 19 BUZZ</text>
+<text class="tp" x="686" y="645">pin 39 GND</text>
+<!--MORE3-->
+
+
+</svg>
