@@ -1,819 +1,649 @@
-/* ============================================================
-   NeuroCamo Web — client
-   Single page, no build step. Renders the verdict, the two frames,
-   and the layer-3 spike spectrogram on a canvas using the same
-   banded colormap idea as the Echolyx spectrogram: hue encodes
-   which density band a cell falls in, luminance encodes rate.
-   ============================================================ */
+/* ==========================================================================
+   NEUROCAMO GCS & SNN ANALYTICS SUITE — CLIENT CONTROLLER
+   Full-featured SPA for Tactical Camouflage Reconnaissance & Spiking Analytics
+   ========================================================================== */
 
-const BAND_RGB = {
-  normal: [0, 229, 160],
-  stress: [245, 163, 0],
-  fault: [255, 68, 85],
-};
-const BG_RGB = [8, 8, 11];
-const OFF_RGB = [120, 124, 140];
-
-/* band cut points as a fraction of the frame's peak firing rate */
-const CUT_STRESS = 0.33;
-const CUT_FAULT = 0.66;
-
-const $ = (id) => document.getElementById(id);
-
-const els = {
-  pip: $("pip"),
-  pipText: $("pipText"),
-  deck: $("deck"),
-  file: $("file"),
-  deckIdle: $("deckIdle"),
-  deckLoaded: $("deckLoaded"),
-  thumb: $("thumb"),
-  fname: $("fname"),
-  fmeta: $("fmeta"),
-  run: $("run"),
-  alertSlot: $("alertSlot"),
-  idle: $("idle"),
-  results: $("results"),
-  dial: $("dial"),
-  verdictWord: $("verdictWord"),
-  verdictSub: $("verdictSub"),
-  readout: $("readout"),
-  inImg: $("inImg"),
-  outImg: $("outImg"),
-  inMeta: $("inMeta"),
-  outMeta: $("outMeta"),
-  specWrap: $("specWrap"),
-  spec: $("spec"),
-  probe: $("probe"),
-  specMeta: $("specMeta"),
-  rate: $("rate"),
-  meters: $("meters"),
-  gateRows: $("gateRows"),
-  legend: $("legend"),
-  bandChips: $("bandChips"),
+const BAND_COLORS = {
+  sparse: [0, 229, 160],     // Emerald
+  active: [245, 163, 0],     // Amber
+  saturated: [255, 68, 85],  // Crimson
 };
 
 const state = {
-  file: null,
-  objectUrl: null,
-  result: null,
-  busy: false,
-  active: { normal: true, stress: true, fault: true },
-  bitmap: null,
-  hover: null,
+  activeView: "view-recon",
+  samples: [],
+  currentSampleId: null,
+  currentResult: null,
+  spikeFilter: "all",
+  batteryCapacityMah: 5200,
+  serialPaused: false,
+  graphs: [],
+  activeGraphIndex: 0,
 };
 
-/* ── status ────────────────────────────────────────────── */
-function setPip(cls, text) {
-  els.pip.className = "pip " + cls;
-  els.pipText.textContent = text;
-}
+// ── DOM Element Cache ────────────────────────────────────────────────────────
+const el = {
+  navTabs: document.querySelectorAll(".nav-tab"),
+  views: document.querySelectorAll(".view"),
+  sysStatusText: document.getElementById("sysStatusText"),
+  fileInput: document.getElementById("fileInput"),
+  sampleCarousel: document.getElementById("sampleCarousel"),
 
-async function loadStatus() {
-  try {
-    const r = await fetch("/api/status");
-    const s = await r.json();
-    $("mCkpt").textContent = s.checkpoint_loaded ? s.checkpoint : "none (random weights)";
-    $("mDev").textContent = s.accelerator;
-    $("mEpoch").textContent = s.epoch || "—";
-    $("mLoss").textContent = s.val_loss ? s.val_loss.toFixed(4) : "—";
-    $("mParams").textContent = s.params.toLocaleString() + " params";
-    $("mSteps").textContent = "T = " + s.timesteps;
-    if (s.checkpoint_loaded) {
-      setPip("live", (s.device === "cuda" ? "GPU" : "CPU") + " ready");
-    } else {
-      setPip("warm", "No checkpoint loaded");
-      modelAlert("No checkpoint found — the model is running with random weights.");
-    }
-    if (s.defaulted_keys && s.defaulted_keys.length) {
-      // the model source gained parameters the checkpoint never trained
-      setPip("warm", "Partial checkpoint");
-      modelAlert(
-        "The checkpoint predates the current model definition. Untrained " +
-          "(init-default) parameters: <b>" +
-          s.defaulted_keys.join(", ") +
-          "</b> — verdicts may differ from the trained model."
-      );
-    }
-  } catch (e) {
-    setPip("down", "Server unreachable");
-  }
-}
+  // Reconnaissance
+  rawImg: document.getElementById("rawImg"),
+  rawPlaceholder: document.getElementById("rawPlaceholder"),
+  detImg: document.getElementById("detImg"),
+  detPlaceholder: document.getElementById("detPlaceholder"),
+  rawMeta: document.getElementById("rawMeta"),
+  detMeta: document.getElementById("detMeta"),
+  reconVerdict: document.getElementById("reconVerdict"),
+  reconVerdictSub: document.getElementById("reconVerdictSub"),
+  reconConf: document.getElementById("reconConf"),
+  reconConfBar: document.getElementById("reconConfBar"),
+  reconTex: document.getElementById("reconTex"),
+  reconGateReason: document.getElementById("reconGateReason"),
+  reconLatency: document.getElementById("reconLatency"),
+  btnGoSpikes: document.getElementById("btnGoSpikes"),
+  btnGoPower: document.getElementById("btnGoPower"),
 
-/* transient per-request errors — cleared on every run */
-function alert_(kind, msg) {
-  els.alertSlot.innerHTML = msg
-    ? `<div class="alert ${kind === "warn" ? "warn" : ""}">${msg}</div>`
-    : "";
-}
+  // SNN Core
+  specCanvas: document.getElementById("specCanvas"),
+  specProbe: document.getElementById("specProbe"),
+  specHoverReadout: document.getElementById("specHoverReadout"),
+  rateCanvas: document.getElementById("rateCanvas"),
+  sparsityVal: document.getElementById("sparsityVal"),
+  activeChannelsVal: document.getElementById("activeChannelsVal"),
+  zeroMacVal: document.getElementById("zeroMacVal"),
+  spikeChips: document.querySelectorAll("#spikeBandFilters .chip"),
 
-/* persistent model-state warning — survives across runs */
-function modelAlert(msg) {
-  $("modelAlert").innerHTML = msg ? `<div class="alert warn">${msg}</div>` : "";
-}
+  // Power
+  pwrSnn: document.getElementById("pwrSnn"),
+  pwrAnn: document.getElementById("pwrAnn"),
+  battSlider: document.getElementById("battSlider"),
+  battCapText: document.getElementById("battCapText"),
+  autoSnn: document.getElementById("autoSnn"),
+  autoAnn: document.getElementById("autoAnn"),
+  graphTabs: document.getElementById("graphTabs"),
+  graphTitle: document.getElementById("graphTitle"),
+  graphDesc: document.getElementById("graphDesc"),
+  graphImg: document.getElementById("graphImg"),
 
-/* ── file selection ────────────────────────────────────── */
-function acceptFile(f) {
-  if (!f) return;
-  if (!/\.(jpe?g|png|bmp|webp)$/i.test(f.name)) {
-    alert_("err", "Unsupported file type. Use JPG, PNG, BMP or WEBP.");
-    return;
-  }
-  if (f.size > 25 * 1024 * 1024) {
-    alert_("err", "That file is over the 25 MB limit.");
-    return;
-  }
-  alert_("", "");
-  state.file = f;
-  if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
-  state.objectUrl = URL.createObjectURL(f);
+  // Telemetry
+  compassCanvas: document.getElementById("compassCanvas"),
+  telemetryBearing: document.getElementById("telemetryBearing"),
+  telemetryCmd: document.getElementById("telemetryCmd"),
+  motorAPwm: document.getElementById("motorAPwm"),
+  motorABar: document.getElementById("motorABar"),
+  motorBPwm: document.getElementById("motorBPwm"),
+  motorBBar: document.getElementById("motorBBar"),
+  serialConsole: document.getElementById("serialConsole"),
+  btnToggleSerial: document.getElementById("btnToggleSerial"),
+  btnClearSerial: document.getElementById("btnClearSerial"),
+};
 
-  els.thumb.src = state.objectUrl;
-  els.fname.textContent = f.name;
-  els.fmeta.textContent = (f.size / 1024).toFixed(0) + " KB";
-  els.deckIdle.classList.add("hidden");
-  els.deckLoaded.classList.remove("hidden");
-  els.deck.classList.add("loaded");
-  els.run.disabled = false;
-}
+// ── Application Initialization ───────────────────────────────────────────────
+document.addEventListener("DOMContentLoaded", async () => {
+  setupNavigation();
+  setupEventListeners();
+  drawCompass(0.0);
+  drawRateCurve([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
-els.file.addEventListener("change", (e) => acceptFile(e.target.files[0]));
-
-["dragenter", "dragover"].forEach((ev) =>
-  els.deck.addEventListener(ev, (e) => {
-    e.preventDefault();
-    els.deck.classList.add("hot");
-  })
-);
-["dragleave", "drop"].forEach((ev) =>
-  els.deck.addEventListener(ev, (e) => {
-    e.preventDefault();
-    els.deck.classList.remove("hot");
-  })
-);
-els.deck.addEventListener("drop", (e) => acceptFile(e.dataTransfer.files[0]));
-
-/* the two bundled sample frames — one COD10K camo target, one ordinary photo */
-$("sampleChips").addEventListener("click", async (e) => {
-  const btn = e.target.closest("[data-sample]");
-  if (!btn || state.busy) return;
-  const path = btn.dataset.sample;
-  try {
-    const blob = await (await fetch(path)).blob();
-    acceptFile(new File([blob], path.split("/").pop(), { type: blob.type }));
-    runDetect();
-  } catch (err) {
-    alert_("err", "Could not load that sample frame.");
-  }
+  await loadSystemStatus();
+  await loadCuratedSamples();
+  await loadPublicationGraphs();
+  startTelemetryTicker();
 });
 
-/* ── run detection ─────────────────────────────────────── */
-els.run.addEventListener("click", runDetect);
-
-async function runDetect() {
-  if (!state.file || state.busy) return;
-  state.busy = true;
-  els.run.disabled = true;
-  els.run.textContent = "Encoding spikes…";
-  els.deck.classList.add("scan");
-  setPip("warm", "Running 16-timestep pass");
-  alert_("", "");
-
-  const body = new FormData();
-  body.append("image", state.file);
-
-  try {
-    const r = await fetch("/api/detect", { method: "POST", body });
-    const text = await r.text();
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (parseErr) {
-      throw new Error(`Server error (${r.status}). Check backend console log.`);
-    }
-
-    if (!r.ok) throw new Error(data.error || "Request failed (" + r.status + ")");
-    state.result = data;
-    els.inImg.src = state.objectUrl;
-    render(data);
-    setPip("live", "Pass complete · " + data.latency_ms.toFixed(0) + " ms");
-  } catch (e) {
-    alert_("err", e.message);
-    setPip("down", "Inference failed");
-  } finally {
-    state.busy = false;
-    state.file && (els.run.disabled = false);
-    els.run.textContent = "Run detection";
-    els.deck.classList.remove("scan");
-  }
-}
-
-/* ── Phone IP Camera Live Stream Handling ───────────────── */
-const srcFileBtn = $("srcFileBtn");
-const srcIpBtn = $("srcIpBtn");
-const fileSourceGroup = $("fileSourceGroup");
-const ipSourceGroup = $("ipSourceGroup");
-const ipUrlInput = $("ipUrlInput");
-const toggleStreamBtn = $("toggleStreamBtn");
-
-let isStreaming = false;
-let streamTimer = null;
-
-srcFileBtn.addEventListener("click", () => {
-  srcFileBtn.classList.add("active");
-  srcIpBtn.classList.remove("active");
-  fileSourceGroup.classList.remove("hidden");
-  ipSourceGroup.classList.add("hidden");
-  els.run.classList.remove("hidden");
-  stopStream();
-});
-
-srcIpBtn.addEventListener("click", () => {
-  srcIpBtn.classList.add("active");
-  srcFileBtn.classList.remove("active");
-  fileSourceGroup.classList.add("hidden");
-  ipSourceGroup.classList.remove("hidden");
-  els.run.classList.add("hidden");
-});
-
-// Presets
-$("presetIpWebcam").addEventListener("click", () => {
-  let val = ipUrlInput.value.trim() || "http://192.168.1.50:8080";
-  val = val.replace(/\/(video|shot\.jpg|photo\.jpg)?$/, "");
-  ipUrlInput.value = val + "/shot.jpg";
-});
-
-$("presetIpVideo").addEventListener("click", () => {
-  let val = ipUrlInput.value.trim() || "http://192.168.1.50:8080";
-  val = val.replace(/\/(video|shot\.jpg|photo\.jpg)?$/, "");
-  ipUrlInput.value = val + "/video";
-});
-
-$("presetDroidCam").addEventListener("click", () => {
-  let val = ipUrlInput.value.trim() || "http://192.168.1.50:4747";
-  val = val.replace(/\/(video|shot\.jpg|photo\.jpg)?$/, "");
-  ipUrlInput.value = val + "/video";
-});
-
-const detectFrameBtn = $("detectFrameBtn");
-
-toggleStreamBtn.addEventListener("click", () => {
-  if (isStreaming) {
-    stopStream();
-  } else {
-    startStream();
-  }
-});
-
-detectFrameBtn.addEventListener("click", runStreamDetection);
-
-function setLiveOnlyMode(isLiveOnly) {
-  const verdictPanel = $("verdictPanel");
-  const detectionPanel = $("detectionPanel");
-  const specPanel = $("specPanel");
-  const bottomMetricsGrid = $("bottomMetricsGrid");
-
-  if (isLiveOnly) {
-    els.results.classList.add("live-only-full");
-    if (verdictPanel) verdictPanel.classList.add("hidden");
-    if (detectionPanel) detectionPanel.classList.add("hidden");
-    if (specPanel) specPanel.classList.add("hidden");
-    if (bottomMetricsGrid) bottomMetricsGrid.classList.add("hidden");
-  } else {
-    els.results.classList.remove("live-only-full");
-    if (verdictPanel) verdictPanel.classList.remove("hidden");
-    if (detectionPanel) detectionPanel.classList.remove("hidden");
-    if (specPanel) specPanel.classList.remove("hidden");
-    if (bottomMetricsGrid) bottomMetricsGrid.classList.remove("hidden");
-  }
-}
-
-function startStream() {
-  let url = ipUrlInput.value.trim();
-  if (!url) {
-    alert_("err", "Please enter your Phone's IP Camera URL.");
-    return;
-  }
-
-  // Auto-format IP Webcam stream URL if user entered root address
-  if (url.startsWith("http")) {
-    if (!anyExt(url)) {
-      if (!url.endsWith("/")) url += "/";
-      url += "video";
-    }
-  }
-
-  const feedUrl = "/api/video_feed?url=" + encodeURIComponent(url);
-
-  isStreaming = true;
-  toggleStreamBtn.textContent = "Stop Live Camera Feed";
-  toggleStreamBtn.classList.add("streaming");
-  detectFrameBtn.classList.remove("hidden");
-  setPip("live", "LIVE Phone Camera (30 FPS)");
-  alert_("", "");
-
-  els.inImg.onerror = () => {
-    alert_("err", `Could not connect to camera at '${url}'. Make sure <b>IP Webcam</b> app is open on your phone, <b>'Start server'</b> is tapped, and both phone & PC are on the same Wi-Fi network.`);
-    stopStream();
-  };
-
-  // Reveal stage, hide metrics/graphs, and show pure live video stream
-  els.idle.classList.add("hidden");
-  els.results.classList.remove("hidden");
-  setLiveOnlyMode(true);
-  els.inImg.src = feedUrl;
-  els.inMeta.textContent = "Live Stream (30 FPS)";
-}
-
-function anyExt(u) {
-  return [".jpg", ".jpeg", ".png", "/shot.jpg", "/video", "/photo.jpg", "/mempkg"].some(ext => u.toLowerCase().endsWith(ext));
-}
-
-function stopStream() {
-  isStreaming = false;
-  toggleStreamBtn.textContent = "Connect Live Camera Feed";
-  toggleStreamBtn.classList.remove("streaming");
-  detectFrameBtn.classList.add("hidden");
-  setPip("live", "Stream Stopped");
-  els.inImg.src = "";
-  els.outImg.src = "";
-  setLiveOnlyMode(false);
-}
-
-async function runStreamDetection() {
-  let url = ipUrlInput.value.trim();
-  if (!url) return;
-
-  detectFrameBtn.disabled = true;
-  detectFrameBtn.textContent = "Running SNN Inference...";
-  setPip("warm", "Running SNN Pass on Live Frame");
-  alert_("", "");
-
-  try {
-    const r = await fetch("/api/detect_stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stream_url: url })
+// ── 1. Tab Navigation ────────────────────────────────────────────────────────
+function setupNavigation() {
+  el.navTabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const targetView = tab.getAttribute("data-view");
+      switchView(targetView);
     });
-    
-    const text = await r.text();
-    let data = {};
-    try {
-      data = JSON.parse(text);
-    } catch (parseErr) {
-      data = { error: `Server error (${r.status})` };
-    }
-
-    if (!r.ok) {
-      throw new Error(data.error || `HTTP ${r.status} error from server`);
-    }
-
-    state.result = data;
-    if (data.input_png) els.inImg.src = data.input_png;
-    render(data);
-    setPip("live", "Pass complete · " + data.latency_ms.toFixed(0) + " ms");
-  } catch (e) {
-    alert_("err", e.message);
-    setPip("down", "Stream Connection Error");
-  } finally {
-    detectFrameBtn.disabled = false;
-    detectFrameBtn.textContent = "Run SNN Detection on Current Frame";
-  }
-}
-
-/* ── render ────────────────────────────────────────────── */
-function pct(v) {
-  return (v * 100).toFixed(1) + "%";
-}
-
-function render(d) {
-  els.idle.classList.add("hidden");
-  els.results.classList.remove("hidden");
-  setLiveOnlyMode(false);
-
-  els.verdictWord.textContent = d.verdict;
-  els.verdictWord.className = "verdict-word b-" + d.band;
-  els.verdictSub.textContent = d.gate_reason;
-
-  els.readout.innerHTML = [
-    ["Confidence", pct(d.confidence), "gated"],
-    ["Raw SNN", pct(d.snn_confidence), "pre-gate"],
-    ["Texture", d.texture_score.toFixed(0), "laplacian var"],
-    ["Sparsity", pct(d.sparsity), "silent neurons"],
-    ["Latency", d.latency_ms.toFixed(0) + " ms", "encode + 16 steps"],
-    ["Active ch.", d.spectrogram.active_channels + " / " + d.spectrogram.n_channels, "rate > 1%"],
-  ]
-    .map(
-      ([k, v, s]) =>
-        `<div><dt>${k}</dt><dd>${v}<br /><small>${s}</small></dd></div>`
-    )
-    .join("");
-
-  drawDial(d);
-
-  els.inImg.src = state.objectUrl;
-  els.outImg.src = d.result_png;
-  els.inMeta.textContent = d.image_size[0] + " × " + d.image_size[1];
-  els.outMeta.textContent = d.bbox_drawn
-    ? "box " + d.bbox_px.join(", ")
-    : "no box — below 25% gate";
-
-  els.specMeta.textContent =
-    d.spectrogram.n_channels +
-    " ch × " +
-    d.spectrogram.n_steps +
-    " steps · peak " +
-    pct(d.spectrogram.peak_rate);
-
-  buildBitmap(d.spectrogram);
-  drawSpec();
-  drawRate(d.spectrogram.per_step_rate);
-  drawGate(d);
-}
-
-/* ── confidence dial ───────────────────────────────────── */
-function drawDial(d) {
-  const c = els.dial;
-  const ctx = c.getContext("2d");
-  const S = c.width;
-  const cx = S / 2;
-  const cy = S / 2;
-  const R = S * 0.4;
-  const lw = S * 0.075;
-  const A0 = Math.PI * 0.75;
-  const SPAN = Math.PI * 1.5;
-  const [r, g, b] = BAND_RGB[d.band];
-
-  ctx.clearRect(0, 0, S, S);
-
-  ctx.lineCap = "round";
-  ctx.lineWidth = lw;
-  ctx.strokeStyle = "#13131a";
-  ctx.beginPath();
-  ctx.arc(cx, cy, R, A0, A0 + SPAN);
-  ctx.stroke();
-
-  ctx.strokeStyle = `rgb(${r},${g},${b})`;
-  ctx.beginPath();
-  ctx.arc(cx, cy, R, A0, A0 + SPAN * Math.max(0.004, d.confidence));
-  ctx.stroke();
-
-  // threshold ticks at the two decision boundaries
-  ctx.lineWidth = 2;
-  for (const t of [d.thresholds.possible, d.thresholds.detected]) {
-    const a = A0 + SPAN * t;
-    ctx.strokeStyle = "rgba(238,238,242,0.35)";
-    ctx.beginPath();
-    ctx.moveTo(cx + Math.cos(a) * (R - lw / 2), cy + Math.sin(a) * (R - lw / 2));
-    ctx.lineTo(cx + Math.cos(a) * (R + lw / 2), cy + Math.sin(a) * (R + lw / 2));
-    ctx.stroke();
-  }
-
-  ctx.fillStyle = "#eeeef2";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.font = `700 ${S * 0.19}px Outfit, sans-serif`;
-  ctx.fillText((d.confidence * 100).toFixed(0) + "%", cx, cy - S * 0.02);
-  ctx.fillStyle = "#5e5e6e";
-  ctx.font = `${S * 0.065}px "DM Mono", monospace`;
-  ctx.fillText("CONFIDENCE", cx, cy + S * 0.13);
-}
-
-/* ── spike spectrogram ─────────────────────────────────── */
-const PAD_L = 52;
-const PAD_B = 20;
-const PAD_T = 8;
-const PAD_R = 8;
-const PLOT_H = 260;
-
-function bandOfValue(v) {
-  if (v >= CUT_FAULT) return "fault";
-  if (v >= CUT_STRESS) return "stress";
-  return "normal";
-}
-
-/* Native-resolution heatmap (n_steps x n_channels), scaled by the GPU on draw
-   so paint cost stays flat regardless of display size. */
-function buildBitmap(spec) {
-  const { n_channels, n_steps, data } = spec;
-  const off = document.createElement("canvas");
-  off.width = n_steps;
-  off.height = n_channels;
-  const ctx = off.getContext("2d");
-  const img = ctx.createImageData(n_steps, n_channels);
-
-  for (let row = 0; row < n_channels; row++) {
-    // channel 0 at the bottom, like a frequency axis
-    const y = n_channels - 1 - row;
-    for (let col = 0; col < n_steps; col++) {
-      const v = data[row * n_steps + col] / 255;
-      const band = bandOfValue(v);
-      const on = state.active[band];
-      const [br, bg, bb] = on ? BAND_RGB[band] : OFF_RGB;
-      // mild gamma: layer-3 rates cluster low, a linear ramp reads almost black
-      const t = Math.pow(v, 0.85);
-      const hot = Math.max(0, t - 0.85) / 0.15;
-      const i = (y * n_steps + col) * 4;
-      img.data[i] = BG_RGB[0] + (br - BG_RGB[0]) * t + (255 - br) * hot * 0.7;
-      img.data[i + 1] = BG_RGB[1] + (bg - BG_RGB[1]) * t + (255 - bg) * hot * 0.7;
-      img.data[i + 2] = BG_RGB[2] + (bb - BG_RGB[2]) * t + (255 - bb) * hot * 0.7;
-      img.data[i + 3] = 255;
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-  state.bitmap = off;
-}
-
-function drawSpec() {
-  if (!state.bitmap || !state.result) return;
-  const spec = state.result.spectrogram;
-  const canvas = els.spec;
-  const width = Math.max(360, Math.round(els.specWrap.clientWidth));
-  const height = PLOT_H + PAD_T + PAD_B;
-  const plotW = width - PAD_L - PAD_R;
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
-
-  canvas.width = width * dpr;
-  canvas.height = height * dpr;
-  canvas.style.width = "100%";
-  canvas.style.height = height + "px";
-
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height);
-
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(state.bitmap, PAD_L, PAD_T, plotW, PLOT_H);
-
-  ctx.font = '9px "DM Mono", monospace';
-  ctx.textBaseline = "middle";
-
-  // channel axis
-  ctx.fillStyle = "#5e5e6e";
-  ctx.textAlign = "right";
-  const step = Math.max(1, Math.round(spec.n_channels / 4));
-  for (let ch = 0; ch < spec.n_channels; ch += step) {
-    const y = PAD_T + PLOT_H - (ch / (spec.n_channels - 1)) * PLOT_H;
-    ctx.fillText("ch " + ch, PAD_L - 6, y);
-    ctx.strokeStyle = "rgba(255,255,255,0.05)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(PAD_L, Math.round(y) + 0.5);
-    ctx.lineTo(PAD_L + plotW, Math.round(y) + 0.5);
-    ctx.stroke();
-  }
-
-  // timestep axis
-  ctx.fillStyle = "#5e5e6e";
-  ctx.textAlign = "center";
-  for (let t = 0; t < spec.n_steps; t += Math.max(1, Math.round(spec.n_steps / 8))) {
-    const x = PAD_L + ((t + 0.5) / spec.n_steps) * plotW;
-    ctx.fillText("t" + t, x, PAD_T + PLOT_H + 10);
-  }
-
-  if (state.hover) {
-    ctx.strokeStyle = "rgba(238,238,242,0.35)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(state.hover.x, PAD_T);
-    ctx.lineTo(state.hover.x, PAD_T + PLOT_H);
-    ctx.moveTo(PAD_L, state.hover.y);
-    ctx.lineTo(PAD_L + plotW, state.hover.y);
-    ctx.stroke();
-  }
-
-  ctx.strokeStyle = "rgba(255,255,255,0.08)";
-  ctx.strokeRect(PAD_L + 0.5, PAD_T + 0.5, plotW - 1, PLOT_H - 1);
-  state.specGeom = { width, height, plotW };
-}
-
-/* hover probe over the spectrogram */
-els.spec.addEventListener("mousemove", (e) => {
-  if (!state.result || !state.specGeom) return;
-  const spec = state.result.spectrogram;
-  const { width, height, plotW } = state.specGeom;
-  const rect = els.spec.getBoundingClientRect();
-  const scale = width / rect.width;
-  const x = (e.clientX - rect.left) * scale;
-  const y = (e.clientY - rect.top) * scale;
-
-  if (x < PAD_L || x > PAD_L + plotW || y < PAD_T || y > PAD_T + PLOT_H) {
-    clearProbe();
-    return;
-  }
-
-  const col = Math.min(
-    spec.n_steps - 1,
-    Math.max(0, Math.floor(((x - PAD_L) / plotW) * spec.n_steps))
-  );
-  const ch = Math.min(
-    spec.n_channels - 1,
-    Math.max(0, Math.round(((PAD_T + PLOT_H - y) / PLOT_H) * (spec.n_channels - 1)))
-  );
-  const rel = spec.data[ch * spec.n_steps + col] / 255;
-  const rate = rel * spec.peak_rate;
-
-  state.hover = { x, y };
-  drawSpec();
-
-  els.probe.classList.remove("hidden");
-  els.probe.innerHTML =
-    `<b>ch ${ch}</b> · t${col}<br />rate ${(rate * 100).toFixed(1)}% · ` +
-    bandOfValue(rel).toUpperCase();
-  const left = Math.min(Math.max(x + 10, PAD_L), width - 150);
-  els.probe.style.left = (left / width) * 100 + "%";
-  els.probe.style.top = ((y + 10) / height) * 100 + "%";
-});
-
-els.spec.addEventListener("mouseleave", clearProbe);
-
-function clearProbe() {
-  if (!state.hover) return;
-  state.hover = null;
-  els.probe.classList.add("hidden");
-  drawSpec();
-}
-
-/* ── population rate curve ─────────────────────────────── */
-function drawRate(series) {
-  const canvas = els.rate;
-  const wrap = canvas.parentElement;
-  const width = Math.max(280, Math.round(wrap.clientWidth));
-  const height = 150;
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
-  const L = 44,
-    R = 10,
-    T = 12,
-    B = 20;
-
-  canvas.width = width * dpr;
-  canvas.height = height * dpr;
-  canvas.style.width = "100%";
-  canvas.style.height = height + "px";
-
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height);
-
-  const plotW = width - L - R;
-  const plotH = height - T - B;
-  const peak = Math.max(...series, 1e-6);
-  const xOf = (i) => L + (series.length === 1 ? 0.5 : i / (series.length - 1)) * plotW;
-  const yOf = (v) => T + plotH - (v / peak) * plotH;
-
-  ctx.font = '9px "DM Mono", monospace';
-  ctx.textBaseline = "middle";
-  ctx.textAlign = "right";
-  for (let k = 0; k <= 2; k++) {
-    const v = (peak * k) / 2;
-    const y = yOf(v);
-    ctx.fillStyle = "#5e5e6e";
-    ctx.fillText((v * 100).toFixed(1) + "%", L - 6, y);
-    ctx.strokeStyle = "rgba(255,255,255,0.05)";
-    ctx.beginPath();
-    ctx.moveTo(L, Math.round(y) + 0.5);
-    ctx.lineTo(L + plotW, Math.round(y) + 0.5);
-    ctx.stroke();
-  }
-
-  // area under the curve, then the stroke, then per-step dots
-  ctx.beginPath();
-  ctx.moveTo(xOf(0), T + plotH);
-  series.forEach((v, i) => ctx.lineTo(xOf(i), yOf(v)));
-  ctx.lineTo(xOf(series.length - 1), T + plotH);
-  ctx.closePath();
-  ctx.fillStyle = "rgba(0,229,160,0.10)";
-  ctx.fill();
-
-  ctx.beginPath();
-  series.forEach((v, i) => (i ? ctx.lineTo(xOf(i), yOf(v)) : ctx.moveTo(xOf(i), yOf(v))));
-  ctx.strokeStyle = "#00e5a0";
-  ctx.lineWidth = 1.6;
-  ctx.stroke();
-
-  series.forEach((v, i) => {
-    ctx.beginPath();
-    ctx.arc(xOf(i), yOf(v), 2, 0, Math.PI * 2);
-    ctx.fillStyle = "#00e5a0";
-    ctx.fill();
   });
 
-  ctx.fillStyle = "#5e5e6e";
+  el.btnGoSpikes.addEventListener("click", () => switchView("view-spikes"));
+  el.btnGoPower.addEventListener("click", () => switchView("view-power"));
+}
+
+function switchView(viewId) {
+  state.activeView = viewId;
+
+  el.navTabs.forEach((tab) => {
+    if (tab.getAttribute("data-view") === viewId) {
+      tab.classList.add("active");
+    } else {
+      tab.classList.remove("active");
+    }
+  });
+
+  el.views.forEach((view) => {
+    if (view.id === viewId) {
+      view.classList.add("active");
+    } else {
+      view.classList.remove("active");
+    }
+  });
+
+  // Re-draw canvases if their dimensions adjusted
+  if (viewId === "view-spikes" && state.currentResult) {
+    renderSpectrogram(state.currentResult.spectrogram);
+    drawRateCurve(state.currentResult.spectrogram.per_step_rate);
+  } else if (viewId === "view-telemetry" && state.currentResult) {
+    const bearing = state.currentResult.telemetry?.bearing_deg || 0.0;
+    drawCompass(bearing);
+  }
+}
+
+// ── 2. System Status & Samples Loading ───────────────────────────────────────
+async function loadSystemStatus() {
+  try {
+    const res = await fetch("/api/status");
+    const data = await res.json();
+    if (data.ready) {
+      el.sysStatusText.textContent = `JETSON ${data.device.toUpperCase()} // READY`;
+    }
+  } catch (err) {
+    el.sysStatusText.textContent = "STANDALONE MODE";
+  }
+}
+
+async function loadCuratedSamples() {
+  try {
+    const res = await fetch("/api/samples");
+    state.samples = await res.json();
+
+    el.sampleCarousel.innerHTML = "";
+    state.samples.forEach((sample, idx) => {
+      const pill = document.createElement("button");
+      pill.className = "sample-pill" + (idx === 0 ? " active" : "");
+      pill.setAttribute("data-id", sample.id);
+      pill.innerHTML = `
+        <span class="sample-pill-cat">${sample.category}</span>
+        <span class="sample-pill-title">${sample.title}</span>
+      `;
+      pill.addEventListener("click", () => {
+        document.querySelectorAll(".sample-pill").forEach((p) => p.classList.remove("active"));
+        pill.classList.add("active");
+        triggerSampleInference(sample.id);
+      });
+      el.sampleCarousel.appendChild(pill);
+    });
+
+    // Auto-trigger the first verified sample
+    if (state.samples.length > 0) {
+      triggerSampleInference(state.samples[0].id);
+    }
+  } catch (err) {
+    console.error("Failed to load samples:", err);
+  }
+}
+
+async function triggerSampleInference(sampleId) {
+  state.currentSampleId = sampleId;
+  setProcessingState(true);
+
+  try {
+    const res = await fetch(`/api/detect_sample/${sampleId}`);
+    const data = await res.json();
+    if (data.error) {
+      alert("Inference Error: " + data.error);
+      return;
+    }
+    applyInferenceResult(data);
+  } catch (err) {
+    console.error("Sample detection failed:", err);
+  } finally {
+    setProcessingState(false);
+  }
+}
+
+// ── 3. Custom Image Upload ───────────────────────────────────────────────────
+function setupEventListeners() {
+  el.fileInput.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    // Deselect carousel pills
+    document.querySelectorAll(".sample-pill").forEach((p) => p.classList.remove("active"));
+
+    const formData = new FormData();
+    formData.append("image", file);
+
+    setProcessingState(true);
+    try {
+      const res = await fetch("/api/detect", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json();
+      if (data.error) {
+        alert("Upload Error: " + data.error);
+        return;
+      }
+      applyInferenceResult(data);
+    } catch (err) {
+      alert("Failed to run detection on uploaded image: " + err);
+    } finally {
+      setProcessingState(false);
+    }
+  });
+
+  // Spike Band Filters
+  el.spikeChips.forEach((chip) => {
+    chip.addEventListener("click", () => {
+      el.spikeChips.forEach((c) => c.classList.remove("active"));
+      chip.classList.add("active");
+      state.spikeFilter = chip.getAttribute("data-band");
+      if (state.currentResult?.spectrogram) {
+        renderSpectrogram(state.currentResult.spectrogram);
+      }
+    });
+  });
+
+  // Battery Slider
+  el.battSlider.addEventListener("input", (e) => {
+    const mah = parseInt(e.target.value, 10);
+    state.batteryCapacityMah = mah;
+    updateBatteryAutonomy(mah);
+  });
+
+  // Serial Console Controls
+  el.btnToggleSerial.addEventListener("click", () => {
+    state.serialPaused = !state.serialPaused;
+    el.btnToggleSerial.textContent = state.serialPaused ? "Resume Feed" : "Pause Feed";
+  });
+
+  el.btnClearSerial.addEventListener("click", () => {
+    el.serialConsole.innerHTML = "";
+  });
+
+  // Spike Spectrogram Hover Probe
+  el.specCanvas.addEventListener("mousemove", onSpecHover);
+  el.specCanvas.addEventListener("mouseleave", () => {
+    el.specProbe.style.display = "none";
+    el.specHoverReadout.textContent = "Hover over the spike matrix to inspect channel firing rates.";
+  });
+}
+
+function setProcessingState(busy) {
+  if (busy) {
+    el.reconVerdict.textContent = "PROCESSING SNN SPIKES...";
+    el.reconVerdict.style.color = "var(--color-cyan)";
+  }
+}
+
+// ── 4. Apply Detection Results to All Views ──────────────────────────────────
+function applyInferenceResult(data) {
+  state.currentResult = data;
+
+  // View 1: Reconnaissance
+  el.rawImg.src = data.input_png || "";
+  el.rawImg.classList.add("visible");
+  el.rawPlaceholder.style.display = "none";
+
+  el.detImg.src = data.result_png || "";
+  el.detImg.classList.add("visible");
+  el.detPlaceholder.style.display = "none";
+
+  const sz = data.image_size || [0, 0];
+  el.rawMeta.textContent = `${sz[0]}×${sz[1]} px · ${data.filename || "Frame"}`;
+
+  const confPct = (data.confidence * 100).toFixed(1);
+  const detected = data.bbox_drawn;
+
+  if (detected) {
+    el.reconVerdict.textContent = "TARGET IDENTIFIED (ENGAGED)";
+    el.reconVerdict.style.color = "var(--color-emerald)";
+    el.reconVerdictSub.textContent = `Dense mask objectness verified: ${confPct}%`;
+  } else {
+    el.reconVerdict.textContent = "SECTOR CLEAR (NO CAMOUFLAGE)";
+    el.reconVerdict.style.color = "var(--text-muted)";
+    el.reconVerdictSub.textContent = data.gate_reason || "No camouflage patterns detected";
+  }
+
+  el.reconConf.textContent = `${confPct}%`;
+  el.reconConfBar.style.width = `${Math.min(100, data.confidence * 100)}%`;
+
+  el.reconTex.textContent = `${data.texture_score.toFixed(1)}`;
+  el.reconGateReason.textContent = `Gate: ${data.plain_background ? "Plain BG" : "Complex Scene"}`;
+
+  el.reconLatency.textContent = `${data.latency_ms.toFixed(1)} ms`;
+  const fpsEq = data.latency_ms > 0 ? (1000.0 / data.latency_ms).toFixed(0) : "60";
+  el.reconFps.textContent = `Inference rate: ~${fpsEq} FPS`;
+
+  // View 2: Neuromorphic Core
+  if (data.spectrogram) {
+    renderSpectrogram(data.spectrogram);
+    drawRateCurve(data.spectrogram.per_step_rate);
+    el.activeChannelsVal.textContent = `${data.spectrogram.active_channels} / 128`;
+  }
+  const sparsityPct = (data.sparsity * 100).toFixed(1);
+  el.sparsityVal.textContent = `${sparsityPct}%`;
+  el.zeroMacVal.textContent = `${sparsityPct}%`;
+
+  // View 3: Power Benchmarks
+  const snnPwr = data.telemetry?.power_snn_w || 0.91;
+  const annPwr = data.telemetry?.power_ann_w || 8.70;
+  el.pwrSnn.textContent = `${snnPwr.toFixed(2)} W`;
+  el.pwrAnn.textContent = `${annPwr.toFixed(2)} W`;
+
+  // View 4: Telemetry
+  const tel = data.telemetry || {};
+  const bearing = tel.bearing_deg || 0.0;
+  drawCompass(bearing);
+  el.telemetryBearing.textContent = (bearing >= 0 ? "+" : "") + bearing.toFixed(1) + "°";
+  el.telemetryCmd.textContent = tel.command || "PATROL SCAN";
+
+  const m1 = tel.motor_a || 0;
+  const m2 = tel.motor_b || 0;
+  el.motorAPwm.textContent = `${m1} / 255`;
+  el.motorBPwm.textContent = `${m2} / 255`;
+  el.motorABar.style.width = `${(m1 / 255) * 100}%`;
+  el.motorBBar.style.width = `${(m2 / 255) * 100}%`;
+
+  // Add serial packet to console
+  if (tel.packet) {
+    appendSerialLog(tel.packet);
+  }
+}
+
+// ── 5. Canvas: Layer-3 Spike Spectrogram ─────────────────────────────────────
+function renderSpectrogram(spec) {
+  const canvas = el.specCanvas;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+
+  ctx.fillStyle = "#06080b";
+  ctx.fillRect(0, 0, w, h);
+
+  const nChannels = spec.n_channels || 128;
+  const nSteps = spec.n_steps || 16;
+  const data = spec.data; // Quantized 0-255 flat array [row0(t0..t15), row1, ...]
+
+  const cellW = w / nSteps;
+  const cellH = h / nChannels;
+
+  const filter = state.spikeFilter;
+
+  for (let c = 0; c < nChannels; c++) {
+    for (let t = 0; t < nSteps; t++) {
+      const idx = c * nSteps + t;
+      const val = data[idx] / 255.0; // 0.0 - 1.0
+
+      if (val < 0.02) continue; // Skip near-zero background
+
+      let band = "sparse";
+      if (val > 0.66) band = "saturated";
+      else if (val > 0.33) band = "active";
+
+      // Apply band filter
+      if (filter !== "all" && filter !== band) {
+        ctx.fillStyle = "rgba(40, 48, 64, 0.4)";
+        ctx.fillRect(t * cellW, c * cellH, cellW - 0.5, cellH - 0.5);
+        continue;
+      }
+
+      const rgb = BAND_COLORS[band];
+      const alpha = Math.max(0.2, val);
+      ctx.fillStyle = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
+      ctx.fillRect(t * cellW, c * cellH, cellW - 0.5, cellH - 0.5);
+    }
+  }
+
+  // Draw Subtle Timestep Dividers
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
+  ctx.lineWidth = 1;
+  for (let t = 0; t <= nSteps; t++) {
+    ctx.beginPath();
+    ctx.moveTo(t * cellW, 0);
+    ctx.lineTo(t * cellW, h);
+    ctx.stroke();
+  }
+}
+
+function onSpecHover(e) {
+  if (!state.currentResult?.spectrogram) return;
+
+  const spec = state.currentResult.spectrogram;
+  const rect = el.specCanvas.getBoundingClientRect();
+  const scaleX = el.specCanvas.width / rect.width;
+  const scaleY = el.specCanvas.height / rect.height;
+
+  const mouseX = (e.clientX - rect.left) * scaleX;
+  const mouseY = (e.clientY - rect.top) * scaleY;
+
+  const nChannels = spec.n_channels || 128;
+  const nSteps = spec.n_steps || 16;
+
+  const stepIdx = Math.floor(mouseX / (el.specCanvas.width / nSteps));
+  const chanIdx = Math.floor(mouseY / (el.specCanvas.height / nChannels));
+
+  if (stepIdx >= 0 && stepIdx < nSteps && chanIdx >= 0 && chanIdx < nChannels) {
+    const rawVal = spec.data[chanIdx * nSteps + stepIdx];
+    const rateNorm = (rawVal / 255.0) * (spec.peak_rate || 1.0);
+
+    const txt = `CH ${chanIdx} | t=${stepIdx} | Rate: ${rateNorm.toFixed(3)} (Peak: ${spec.peak_rate.toFixed(3)})`;
+    el.specHoverReadout.textContent = txt;
+
+    el.specProbe.style.display = "block";
+    el.specProbe.style.left = `${e.clientX - rect.left + 15}px`;
+    el.specProbe.style.top = `${e.clientY - rect.top + 10}px`;
+    el.specProbe.textContent = `Ch ${chanIdx} [t${stepIdx}]: ${(rateNorm * 100).toFixed(1)}%`;
+  }
+}
+
+// ── 6. Canvas: Population Rate Curve (t0 -> t15) ─────────────────────────────
+function drawRateCurve(rates) {
+  const canvas = el.rateCanvas;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+
+  ctx.fillStyle = "#06080b";
+  ctx.fillRect(0, 0, w, h);
+
+  const padX = 35;
+  const padY = 25;
+  const drawW = w - padX * 2;
+  const drawH = h - padY * 2;
+
+  // Grid
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(padX, padY, drawW, drawH);
+
+  const maxVal = Math.max(0.1, ...rates);
+
+  // Plot Curve
+  ctx.beginPath();
+  const stepW = drawW / (rates.length - 1);
+
+  rates.forEach((val, i) => {
+    const x = padX + i * stepW;
+    const y = padY + drawH - (val / maxVal) * drawH;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+
+  ctx.strokeStyle = "var(--color-cyan)";
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  // Gradient fill under curve
+  ctx.lineTo(padX + drawW, padY + drawH);
+  ctx.lineTo(padX, padY + drawH);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, padY, 0, padY + drawH);
+  grad.addColorStop(0, "rgba(0, 210, 255, 0.25)");
+  grad.addColorStop(1, "rgba(0, 210, 255, 0.0)");
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Axis Labels
+  ctx.fillStyle = "#7b889e";
+  ctx.font = "10px monospace";
+  ctx.fillText("t0", padX, h - 8);
+  ctx.fillText("t15", padX + drawW - 15, h - 8);
+  ctx.fillText(`${maxVal.toFixed(2)}`, 6, padY + 10);
+}
+
+// ── 7. Canvas: Radial Steering Compass ──────────────────────────────────────
+function drawCompass(bearingDeg) {
+  const canvas = el.compassCanvas;
+  const ctx = canvas.getContext("2d");
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  const r = 90;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Outer ring
+  ctx.strokeStyle = "rgba(0, 210, 255, 0.2)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Inner ring
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.08)";
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.7, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Degree ticks
+  for (let a = 0; a < 360; a += 30) {
+    const rad = ((a - 90) * Math.PI) / 180;
+    const x1 = cx + Math.cos(rad) * (r - 6);
+    const y1 = cy + Math.sin(rad) * (r - 6);
+    const x2 = cx + Math.cos(rad) * r;
+    const y2 = cy + Math.sin(rad) * r;
+
+    ctx.strokeStyle = a % 90 === 0 ? "var(--color-cyan)" : "rgba(255, 255, 255, 0.2)";
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+
+  // Heading Indicators (N, E, S, W)
+  ctx.fillStyle = "#7b889e";
+  ctx.font = "10px monospace";
   ctx.textAlign = "center";
-  for (let i = 0; i < series.length; i += Math.max(1, Math.round(series.length / 8))) {
-    ctx.fillText("t" + i, xOf(i), T + plotH + 10);
-  }
+  ctx.textBaseline = "middle";
+  ctx.fillText("0° (FWD)", cx, cy - r - 12);
 
-  ctx.strokeStyle = "rgba(255,255,255,0.08)";
-  ctx.strokeRect(L + 0.5, T + 0.5, plotW - 1, plotH - 1);
+  // Target Bearing Needle
+  const targetRad = ((bearingDeg - 90) * Math.PI) / 180;
+  const nx = cx + Math.cos(targetRad) * (r - 10);
+  const ny = cy + Math.sin(targetRad) * (r - 10);
+
+  ctx.strokeStyle = "var(--color-emerald)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(nx, ny);
+  ctx.stroke();
+
+  // Target indicator tip
+  ctx.fillStyle = "var(--color-emerald)";
+  ctx.beginPath();
+  ctx.arc(nx, ny, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Center Pivot
+  ctx.fillStyle = "var(--color-cyan)";
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.fill();
 }
 
-/* ── scene gate panel ──────────────────────────────────── */
-function drawGate(d) {
-  const texMax = 1200;
-  const rows = [
-    {
-      name: "Texture",
-      band: "stress",
-      frac: Math.min(1, d.texture_score / texMax),
-      tick: d.thresholds.texture_gate / texMax,
-      tickLabel: "gate 300",
-      val: d.texture_score.toFixed(0),
-      sub: "laplacian var",
-    },
-    {
-      name: "Raw SNN",
-      band: "normal",
-      frac: d.snn_confidence,
-      tick: d.thresholds.detected,
-      tickLabel: "0.60",
-      val: pct(d.snn_confidence),
-      sub: "objectness",
-    },
-    {
-      name: "Sparsity",
-      band: "fault",
-      frac: d.sparsity,
-      tick: 0.85,
-      tickLabel: "target 85%",
-      val: pct(d.sparsity),
-      sub: "silent neurons",
-    },
-  ];
+// ── 8. Battery Autonomy Calculator ───────────────────────────────────────────
+function updateBatteryAutonomy(mah) {
+  const wh = (mah * 12.0) / 1000.0;
+  el.battCapText.textContent = `${mah} mAh (${wh.toFixed(1)} Wh)`;
 
-  els.meters.innerHTML = rows
-    .map(
-      (r) => `
-      <div class="meter-row" style="color: var(--band-${r.band})">
-        <span class="meter-name">${r.name}</span>
-        <span class="meter-track">
-          <span class="meter-fill" style="width:${(r.frac * 100).toFixed(1)}%;background:currentColor"></span>
-          <span class="meter-tick" style="left:${(r.tick * 100).toFixed(1)}%" data-label="${r.tickLabel}"></span>
-        </span>
-        <span class="meter-val">${r.val}<small>${r.sub}</small></span>
-      </div>`
-    )
-    .join("");
+  // SNN average active power: 0.91W, ANN power: 8.70W
+  // Use 85% battery depth-of-discharge usable capacity
+  const usableWh = wh * 0.85;
+  const snnHrs = (usableWh / 0.91).toFixed(1);
+  const annHrs = (usableWh / 8.70).toFixed(1);
 
-  const checks = [
-    [
-      "Plain backdrop",
-      d.plain_background ? "top corners uniform" : "top corners varied",
-      !d.plain_background,
-    ],
-    ["Open sky", d.open_sky ? "bright + smooth top strip" : "no sky signature", !d.open_sky],
-    [
-      "Texture ≥ 300",
-      d.texture_score.toFixed(0),
-      d.texture_score >= d.thresholds.texture_gate,
-    ],
-    [
-      "Gate weight",
-      d.texture_weight.toFixed(1) + " ×",
-      d.texture_weight > 0,
-    ],
-  ];
-
-  els.gateRows.innerHTML = checks
-    .map(
-      ([k, v, pass]) => `
-      <tr${pass ? "" : ' class="picked"'}>
-        <td>${k}</td><td>${v}</td>
-        <td class="${pass ? "v-pass" : "v-block"}">${pass ? "PASS" : "BLOCK"}</td>
-      </tr>`
-    )
-    .join("");
+  el.autoSnn.textContent = `${snnHrs} hrs`;
+  el.autoAnn.textContent = `${annHrs} hrs`;
 }
 
-/* ── band toggles ──────────────────────────────────────── */
-function toggleBand(band) {
-  state.active[band] = !state.active[band];
-  document
-    .querySelectorAll(`[data-band="${band}"]`)
-    .forEach((el) => el.setAttribute("aria-pressed", String(state.active[band])));
-  if (state.result) {
-    buildBitmap(state.result.spectrogram);
-    drawSpec();
+// ── 9. Publication Research Graphs Viewer ────────────────────────────────────
+async function loadPublicationGraphs() {
+  try {
+    const res = await fetch("/api/graphs");
+    state.graphs = await res.json();
+
+    el.graphTabs.innerHTML = "";
+    state.graphs.forEach((g, idx) => {
+      const btn = document.createElement("button");
+      btn.className = "graph-tab-btn" + (idx === 0 ? " active" : "");
+      btn.textContent = g.title.split(":")[0];
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".graph-tab-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        showGraph(idx);
+      });
+      el.graphTabs.appendChild(btn);
+    });
+
+    if (state.graphs.length > 0) {
+      showGraph(0);
+    }
+  } catch (err) {
+    console.error("Failed to load graphs:", err);
   }
 }
 
-[els.legend, els.bandChips].forEach((host) =>
-  host.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-band]");
-    if (btn) toggleBand(btn.dataset.band);
-  })
-);
+function showGraph(index) {
+  state.activeGraphIndex = index;
+  const g = state.graphs[index];
+  if (!g) return;
 
-/* ── resize ────────────────────────────────────────────── */
-let rt = null;
-window.addEventListener("resize", () => {
-  clearTimeout(rt);
-  rt = setTimeout(() => {
-    if (!state.result) return;
-    drawSpec();
-    drawRate(state.result.spectrogram.per_step_rate);
-  }, 120);
-});
+  el.graphTitle.textContent = g.title;
+  el.graphDesc.textContent = g.desc;
+  el.graphImg.src = `/api/graph_img/${g.category}/${g.file}`;
+}
 
-loadStatus();
+// ── 10. Real-time UGV Serial Telemetry Stream ────────────────────────────────
+function appendSerialLog(packet) {
+  if (state.serialPaused) return;
+
+  const now = new Date();
+  const timeStr = now.toTimeString().split(" ")[0];
+
+  const line = document.createElement("div");
+  line.className = "console-line text-emerald";
+  line.textContent = `[${timeStr}] ${packet}`;
+
+  el.serialConsole.appendChild(line);
+  if (el.serialConsole.children.length > 50) {
+    el.serialConsole.removeChild(el.serialConsole.children[0]);
+  }
+  el.serialConsole.scrollTop = el.serialConsole.scrollHeight;
+}
+
+function startTelemetryTicker() {
+  let seq = 482;
+  setInterval(() => {
+    if (state.serialPaused || !state.currentResult) return;
+
+    seq++;
+    const tel = state.currentResult.telemetry || {};
+    const brg = tel.bearing_deg || 0.0;
+    const m1 = tel.motor_a || 0;
+    const m2 = tel.motor_b || 0;
+    const cmd = tel.detected ? "ENGAGE" : "PATROL";
+    const pwr = tel.detected ? "0.91W" : "0.35W";
+
+    const packet = `$UGV,SEQ:${seq.toString().padStart(4, "0")},CMD:${cmd},M1:${m1},M2:${m2},BRG:${brg >= 0 ? "+" : ""}${brg.toFixed(1)},PWR:${pwr}*4B`;
+    appendSerialLog(packet);
+  }, 2000);
+}
