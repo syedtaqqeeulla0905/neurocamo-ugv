@@ -232,7 +232,7 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
     global RAW_UNFILTERED_BGR, LAST_BGR
     h, w = bgr.shape[:2]
     long_edge = max(h, w)
-    max_edge = 640 if is_live else 960
+    max_edge = 424 if is_live else 960
     if long_edge > max_edge:
         s = float(max_edge) / long_edge
         bgr = cv2.resize(bgr, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
@@ -242,7 +242,7 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
     LAST_BGR = bgr.copy()
 
     # Encode input image as base64 JPEG
-    jpeg_qual = 55 if is_live else 85
+    jpeg_qual = 50 if is_live else 85
     ok_in, buf_in = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
     input_b64 = "data:image/jpeg;base64," + base64.b64encode(buf_in).decode("ascii") if ok_in else ""
 
@@ -812,8 +812,13 @@ def _get_rs_pipeline():
     if _rs_pipeline is None:
         pipe = rs.pipeline()
         cfg = rs.config()
-        cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-        pipe.start(cfg)
+        try:
+            cfg.enable_stream(rs.stream.color, 424, 240, rs.format.bgr8, 30)
+            pipe.start(cfg)
+        except Exception:
+            cfg = rs.config()
+            cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+            pipe.start(cfg)
         for _ in range(10):
             pipe.wait_for_frames()
         _rs_pipeline = pipe
@@ -841,6 +846,9 @@ def detect_realsense():
                 return jsonify({"error": "No color frame received from RealSense camera"}), 400
             bgr = np.asanyarray(color_frame.get_data()).copy()
         out = _process_bgr(bgr, "RealSense D435i Live", yolo_conf=yolo_conf, env_filter=env_filter, is_live=is_live)
+        # In live mode: return only essential images, with saliency and camo mask referencing result_png
+        out["saliency_png"] = out["result_png"]
+        out["camo_mask_png"] = out["result_png"]
         return jsonify(sanitize_json(out))
     except Exception as e:
         traceback.print_exc()
@@ -857,7 +865,7 @@ def _rs_mjpeg_generator():
                 if not color_frame:
                     continue
                 bgr = np.asanyarray(color_frame.get_data()).copy()
-            out = _process_bgr(bgr, "RealSense Stream")
+            out = _process_bgr(bgr, "RealSense Stream", is_live=True)
             jpg_b64 = out["result_png"].split(",", 1)[1]
             jpeg_bytes = base64.b64decode(jpg_b64)
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg_bytes + b"\r\n")

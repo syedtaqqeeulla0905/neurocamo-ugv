@@ -659,10 +659,10 @@ function updateDisplayedOverlayImages(data) {
   }
 
   const detImg = getEl("detImg");
-  if (detImg && targetSrc) detImg.src = targetSrc;
+  if (detImg && targetSrc && detImg.src !== targetSrc) detImg.src = targetSrc;
 
   const cmpSnnImg = getEl("cmpSnnImg");
-  if (cmpSnnImg && targetSrc) cmpSnnImg.src = targetSrc;
+  if (cmpSnnImg && targetSrc && cmpSnnImg.src !== targetSrc) cmpSnnImg.src = targetSrc;
 }
 
 // ── Feature 3: PTZ Slew-to-Cue Gimbal Actuator ───────────────────────────────
@@ -810,11 +810,11 @@ function openDossierModal() {
 
   // Set Evidence Images
   const dosRaw = getEl("dosRawImg");
-  if (dosRaw && data.input_png) dosRaw.src = data.input_png;
+  if (dosRaw && data.input_png && dosRaw.src !== data.input_png) dosRaw.src = data.input_png;
   const dosSnn = getEl("dosSnnImg");
-  if (dosSnn && data.result_png) dosSnn.src = data.result_png;
+  if (dosSnn && data.result_png && dosSnn.src !== data.result_png) dosSnn.src = data.result_png;
   const dosYolo = getEl("dosYoloImg");
-  if (dosYolo && yolo.result_png) dosYolo.src = yolo.result_png;
+  if (dosYolo && yolo.result_png && dosYolo.src !== yolo.result_png) dosYolo.src = yolo.result_png;
 
   // Set Table Values
   const detected = data.detected !== undefined ? !!data.detected : (data.verdict === "DETECTED" || data.verdict === "POSSIBLE TARGET");
@@ -863,7 +863,9 @@ function applyInferenceResult(data) {
     const rawImg = getEl("rawImg");
     const rawPh = getEl("rawPlaceholder");
     if (rawImg && data.input_png) {
-      rawImg.src = data.input_png;
+      if (rawImg.src !== data.input_png) {
+        rawImg.src = data.input_png;
+      }
       rawImg.style.display = "block";
       rawImg.classList.add("visible");
       if (rawPh) {
