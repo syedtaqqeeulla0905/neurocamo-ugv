@@ -41,7 +41,7 @@ if NEUROCAMO_ROOT not in sys.path:
 from inference import ModelBundle, run_inference
 from ultralytics import YOLO
 
-HOST = os.environ.get("NEUROCAMO_HOST", "127.0.0.1")
+HOST = os.environ.get("NEUROCAMO_HOST", "0.0.0.0")
 PORT = int(os.environ.get("NEUROCAMO_PORT", "8080"))
 MAX_UPLOAD_MB = 25
 ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".avif"}
