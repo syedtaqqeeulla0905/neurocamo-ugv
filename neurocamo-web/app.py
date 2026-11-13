@@ -228,12 +228,13 @@ def apply_environmental_filter(bgr: np.ndarray, env_filter: str) -> np.ndarray:
     return bgr
 
 
-def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: float = 0.15, env_filter: str = "normal"):
+def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: float = 0.15, env_filter: str = "normal", is_live: bool = False):
     global RAW_UNFILTERED_BGR, LAST_BGR
     h, w = bgr.shape[:2]
     long_edge = max(h, w)
-    if long_edge > 960:
-        s = 960.0 / long_edge
+    max_edge = 640 if is_live else 960
+    if long_edge > max_edge:
+        s = float(max_edge) / long_edge
         bgr = cv2.resize(bgr, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
 
     RAW_UNFILTERED_BGR = bgr.copy()
@@ -241,13 +242,14 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
     LAST_BGR = bgr.copy()
 
     # Encode input image as base64 JPEG
-    ok_in, buf_in = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    jpeg_qual = 65 if is_live else 85
+    ok_in, buf_in = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
     input_b64 = "data:image/jpeg;base64," + base64.b64encode(buf_in).decode("ascii") if ok_in else ""
 
     out = run_inference(BUNDLE, bgr)
 
     annotated = out.pop("annotated_rgb")
-    ok_out, buf_out = cv2.imencode(".jpg", cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    ok_out, buf_out = cv2.imencode(".jpg", cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
     if not ok_out:
         raise RuntimeError("Could not encode result image")
 
@@ -266,14 +268,14 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
             # Saliency False-Color Heatmap (JET)
             heat_color = cv2.applyColorMap(h_full, cv2.COLORMAP_JET)
             saliency_bgr = cv2.addWeighted(bgr, 0.42, heat_color, 0.58, 0)
-            ok_sal, buf_sal = cv2.imencode(".jpg", saliency_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            ok_sal, buf_sal = cv2.imencode(".jpg", saliency_bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
             out["saliency_png"] = "data:image/jpeg;base64," + base64.b64encode(buf_sal).decode("ascii") if ok_sal else out["result_png"]
 
             # Camo Mask (Binary thresholded attention mask)
             _, mask_bin = cv2.threshold(h_full, 80, 255, cv2.THRESH_BINARY)
             camo_mask_bgr = bgr.copy()
             camo_mask_bgr[mask_bin > 0] = cv2.addWeighted(camo_mask_bgr[mask_bin > 0], 0.3, np.full_like(camo_mask_bgr[mask_bin > 0], (0, 230, 160)), 0.7, 0)
-            ok_msk, buf_msk = cv2.imencode(".jpg", camo_mask_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            ok_msk, buf_msk = cv2.imencode(".jpg", camo_mask_bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
             out["camo_mask_png"] = "data:image/jpeg;base64," + base64.b64encode(buf_msk).decode("ascii") if ok_msk else out["result_png"]
         else:
             out["saliency_png"] = out["result_png"]
@@ -283,30 +285,33 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
         out["saliency_png"] = out["result_png"]
         out["camo_mask_png"] = out["result_png"]
 
-    # Temporal Poisson Spike Evolution across T=1..16 timesteps
-    try:
-        resized_t = cv2.resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), (128, 128)).astype(np.float32) / 255.0
-        tensor_t = torch.from_numpy(resized_t).permute(2, 0, 1).unsqueeze(0).to(BUNDLE.device)
-        temporal_steps = []
-        with torch.no_grad():
-            spk_full = BUNDLE.encoder(tensor_t)
-            spk_l3, mem_l3, _ = BUNDLE.model.backbone(spk_full)
-            for t_step in range(1, 17):
-                sub_spk = spk_l3[:t_step]
-                fused = BUNDLE.model.asab(sub_spk, mem_l3 * (t_step / 16.0))
-                hm, off, wh = BUNDLE.model.head(fused)
-                bbox, conf_t = BUNDLE.model.decode_mask(hm)
-                heat_t = torch.sigmoid(hm)[0, 0].cpu().numpy()
-                temporal_steps.append({
-                    "t": t_step,
-                    "conf": round(float(conf_t[0].item()), 3),
-                    "spikes": int(sub_spk.sum().item()),
-                    "peak": round(float(heat_t.max()), 3)
-                })
-        out["temporal_evolution"] = temporal_steps
-    except Exception as te:
-        print(f"Temporal evolution calculation warning: {te}")
+    # Temporal Poisson Spike Evolution across T=1..16 timesteps (bypassed in live mode for maximum FPS)
+    if is_live:
         out["temporal_evolution"] = []
+    else:
+        try:
+            resized_t = cv2.resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), (128, 128)).astype(np.float32) / 255.0
+            tensor_t = torch.from_numpy(resized_t).permute(2, 0, 1).unsqueeze(0).to(BUNDLE.device)
+            temporal_steps = []
+            with torch.no_grad():
+                spk_full = BUNDLE.encoder(tensor_t)
+                spk_l3, mem_l3, _ = BUNDLE.model.backbone(spk_full)
+                for t_step in range(1, 17):
+                    sub_spk = spk_l3[:t_step]
+                    fused = BUNDLE.model.asab(sub_spk, mem_l3 * (t_step / 16.0))
+                    hm, off, wh = BUNDLE.model.head(fused)
+                    bbox, conf_t = BUNDLE.model.decode_mask(hm)
+                    heat_t = torch.sigmoid(hm)[0, 0].cpu().numpy()
+                    temporal_steps.append({
+                        "t": t_step,
+                        "conf": round(float(conf_t[0].item()), 3),
+                        "spikes": int(sub_spk.sum().item()),
+                        "peak": round(float(heat_t.max()), 3)
+                    })
+            out["temporal_evolution"] = temporal_steps
+        except Exception as te:
+            print(f"Temporal evolution calculation warning: {te}")
+            out["temporal_evolution"] = []
 
     # Calculate UGV Telemetry
     bbox = out.get("bbox_norm", [0.5, 0.5, 0.2, 0.2])
@@ -394,7 +399,7 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
         "power_ann_w": 8.70,
     }
 
-    # Live YOLOv8-Nano Baseline Comparison for Major Project Benchmarking
+    # Live YOLOv8-Nano Baseline Comparison (bypassed during live streaming for speed)
     yolo_data = {
         "available": False,
         "conf_threshold": yolo_conf,
@@ -404,10 +409,10 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
         "power_w": 8.70,
         "energy_mj": 40.02,
         "gflops": 8.70,
-        "status": "YOLOv8 MODEL UNAVAILABLE",
+        "status": "YOLOv8 STANDBY (ACTIVE IN COMPARE VIEW)" if is_live else "YOLOv8 MODEL UNAVAILABLE",
         "result_png": "",
     }
-    if YOLO_MODEL is not None:
+    if not is_live and YOLO_MODEL is not None:
         try:
             t_y_start = time.perf_counter()
             y_res = YOLO_MODEL(bgr, conf=yolo_conf, verbose=False, device=BUNDLE.device)[0]
@@ -549,9 +554,10 @@ def detect_upload():
 
     yolo_conf = request.form.get("yolo_conf", request.args.get("yolo_conf", 0.15, type=float), type=float)
     env_filter = request.form.get("env", request.args.get("env", "normal"))
+    is_live = str(request.form.get("is_live", request.args.get("is_live", "0"))).lower() in ("1", "true")
 
     try:
-        out = _process_bgr(bgr, os.path.basename(upload.filename), yolo_conf=yolo_conf, env_filter=env_filter)
+        out = _process_bgr(bgr, os.path.basename(upload.filename), yolo_conf=yolo_conf, env_filter=env_filter, is_live=is_live)
         return jsonify(sanitize_json(out))
     except Exception as e:
         traceback.print_exc()
@@ -815,6 +821,7 @@ def detect_realsense():
         body = request.get_json(silent=True) or {}
         yolo_conf = float(body.get("yolo_conf", request.args.get("yolo_conf", 0.15)))
         env_filter = str(body.get("env_filter", request.args.get("env", "normal")))
+        is_live = bool(body.get("is_live", True))
         with _rs_lock:
             pipeline = _get_rs_pipeline()
             frames = pipeline.wait_for_frames(timeout_ms=3000)
@@ -822,7 +829,7 @@ def detect_realsense():
             if not color_frame:
                 return jsonify({"error": "No color frame from RealSense"}), 500
             bgr = np.asanyarray(color_frame.get_data()).copy()
-        out = _process_bgr(bgr, "RealSense D435i Live", yolo_conf=yolo_conf, env_filter=env_filter)
+        out = _process_bgr(bgr, "RealSense D435i Live", yolo_conf=yolo_conf, env_filter=env_filter, is_live=is_live)
         return jsonify(sanitize_json(out))
     except Exception as e:
         traceback.print_exc()

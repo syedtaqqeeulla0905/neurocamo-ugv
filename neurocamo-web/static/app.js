@@ -527,6 +527,7 @@ async function toggleLiveWebcam() {
           formData.append("image", blob, "webcam_frame.jpg");
           formData.append("yolo_conf", state.yoloConf);
           formData.append("env_filter", state.envFilter);
+          formData.append("is_live", "1");
 
           const res = await fetch("/api/detect", { method: "POST", body: formData });
           if (res.ok) {
@@ -538,8 +539,8 @@ async function toggleLiveWebcam() {
         } finally {
           state.isProcessingCamFrame = false;
         }
-      }, "image/jpeg", 0.78);
-    }, 110);
+      }, "image/jpeg", 0.65);
+    }, 80);
   } catch (err) {
     console.warn("Browser webcam unavailable, switching to RealSense D435i...", err);
     state.isWebcamActive = true;
@@ -552,7 +553,7 @@ async function toggleLiveWebcam() {
         const res = await fetch("/api/detect_realsense", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ yolo_conf: state.yoloConf, env_filter: state.envFilter }),
+          body: JSON.stringify({ yolo_conf: state.yoloConf, env_filter: state.envFilter, is_live: true }),
         });
         const data = await res.json();
         if (res.ok && !data.error) {
@@ -572,7 +573,7 @@ async function toggleLiveWebcam() {
       }
     };
     pollRS();
-    state.webcamInterval = setInterval(pollRS, 250);
+    state.webcamInterval = setInterval(pollRS, 90);
   }
 }
 
@@ -604,7 +605,7 @@ async function toggleRealSense() {
       const res = await fetch("/api/detect_realsense", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ yolo_conf: state.yoloConf, env_filter: state.envFilter }),
+        body: JSON.stringify({ yolo_conf: state.yoloConf, env_filter: state.envFilter, is_live: true }),
       });
       const data = await res.json();
       if (res.ok && !data.error) {
@@ -626,7 +627,7 @@ async function toggleRealSense() {
   };
 
   pollRS();
-  state.rsInterval = setInterval(pollRS, 250);
+  state.rsInterval = setInterval(pollRS, 90);
 }
 
 // ── Feature 2: Tactical False-Color Overlay Selector ─────────────────────────
