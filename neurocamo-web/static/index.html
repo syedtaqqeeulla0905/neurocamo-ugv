@@ -104,13 +104,16 @@
 
         <!-- Environmental Stress Testing Strip -->
         <div class="env-stress-bar">
-          <span class="env-bar-label">OPTICAL STRESS FILTER:</span>
-          <div class="env-chips">
-            <button class="env-chip active" data-filter="normal">Normal Optics</button>
-            <button class="env-chip" data-filter="dusk">Low Light / Dusk</button>
-            <button class="env-chip" data-filter="smoke">Battlefield Smoke &amp; Fog</button>
-            <button class="env-chip" data-filter="noise">Sensor Noise (ISO Grain)</button>
+          <div class="env-bar-group">
+            <span class="env-bar-label">OPTICAL STRESS FILTER:</span>
+            <div class="env-chips">
+              <button class="env-chip active" data-filter="normal">Normal Optics</button>
+              <button class="env-chip" data-filter="dusk">Low Light / Dusk</button>
+              <button class="env-chip" data-filter="smoke">Battlefield Smoke &amp; Fog</button>
+              <button class="env-chip" data-filter="noise">Sensor Noise (ISO Grain)</button>
+            </div>
           </div>
+          <div class="quality-bar-group"><span class="env-bar-label">STREAM QUALITY:</span><div class="quality-chips" id="qualityChips"><button class="quality-chip active" type="button" data-quality="high">HD (640p)</button><button class="quality-chip" type="button" data-quality="medium">Balanced (480p)</button><button class="quality-chip" type="button" data-quality="fast">Fast (240p)</button></div></div>
         </div>
 
         <!-- Detection Stage -->

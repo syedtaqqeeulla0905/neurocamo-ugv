@@ -228,11 +228,21 @@ def apply_environmental_filter(bgr: np.ndarray, env_filter: str) -> np.ndarray:
     return bgr
 
 
-def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: float = 0.15, env_filter: str = "normal", is_live: bool = False):
+def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: float = 0.15, env_filter: str = "normal", is_live: bool = False, stream_quality: str = "high"):
     global RAW_UNFILTERED_BGR, LAST_BGR
     h, w = bgr.shape[:2]
     long_edge = max(h, w)
-    max_edge = 424 if is_live else 960
+    sq = (stream_quality or "high").lower()
+    if sq == "fast":
+        max_edge = 424
+        jpeg_qual = 50
+    elif sq == "medium":
+        max_edge = 480
+        jpeg_qual = 65
+    else:  # "high"
+        max_edge = 640
+        jpeg_qual = 80
+
     if long_edge > max_edge:
         s = float(max_edge) / long_edge
         bgr = cv2.resize(bgr, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
@@ -242,7 +252,6 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
     LAST_BGR = bgr.copy()
 
     # Encode input image as base64 JPEG
-    jpeg_qual = 50 if is_live else 85
     ok_in, buf_in = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
     input_b64 = "data:image/jpeg;base64," + base64.b64encode(buf_in).decode("ascii") if ok_in else ""
 
@@ -558,11 +567,12 @@ def detect_upload():
         return jsonify({"error": "Could not decode image file."}), 400
 
     yolo_conf = request.form.get("yolo_conf", request.args.get("yolo_conf", 0.15, type=float), type=float)
-    env_filter = request.form.get("env", request.args.get("env", "normal"))
+    env_filter = request.form.get("env_filter", request.form.get("env", request.args.get("env", "normal")))
     is_live = str(request.form.get("is_live", request.args.get("is_live", "0"))).lower() in ("1", "true")
+    stream_quality = str(request.form.get("stream_quality", request.args.get("stream_quality", "high")))
 
     try:
-        out = _process_bgr(bgr, os.path.basename(upload.filename), yolo_conf=yolo_conf, env_filter=env_filter, is_live=is_live)
+        out = _process_bgr(bgr, os.path.basename(upload.filename), yolo_conf=yolo_conf, env_filter=env_filter, is_live=is_live, stream_quality=stream_quality)
         return jsonify(sanitize_json(out))
     except Exception as e:
         traceback.print_exc()
@@ -832,6 +842,7 @@ def detect_realsense():
         yolo_conf = float(body.get("yolo_conf", request.args.get("yolo_conf", 0.15)))
         env_filter = str(body.get("env_filter", request.args.get("env", "normal")))
         is_live = bool(body.get("is_live", True))
+        stream_quality = str(body.get("stream_quality", request.args.get("stream_quality", "high")))
         with _rs_lock:
             pipeline = _get_rs_pipeline()
             frames = pipeline.wait_for_frames(timeout_ms=1500)
@@ -845,7 +856,7 @@ def detect_realsense():
             if not color_frame:
                 return jsonify({"error": "No color frame received from RealSense camera"}), 400
             bgr = np.asanyarray(color_frame.get_data()).copy()
-        out = _process_bgr(bgr, "RealSense D435i Live", yolo_conf=yolo_conf, env_filter=env_filter, is_live=is_live)
+        out = _process_bgr(bgr, "RealSense D435i Live", yolo_conf=yolo_conf, env_filter=env_filter, is_live=is_live, stream_quality=stream_quality)
         # In live mode: return only essential images, with saliency and camo mask referencing result_png
         out["saliency_png"] = out["result_png"]
         out["camo_mask_png"] = out["result_png"]

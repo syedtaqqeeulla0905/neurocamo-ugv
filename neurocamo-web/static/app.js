@@ -17,6 +17,7 @@ const state = {
   spikeFilter: "all",
   yoloConf: 0.15,
   envFilter: "normal",
+  streamQuality: "high",
   temporalStep: 16,
   temporalTimer: null,
   isPlayingTemporal: false,
@@ -292,6 +293,7 @@ function setupEventListeners() {
     const formData = new FormData();
     formData.append("image", file);
     formData.append("yolo_conf", state.yoloConf);
+    formData.append("stream_quality", state.streamQuality);
 
     setProcessingState(true);
     try {
@@ -398,6 +400,18 @@ function setupEventListeners() {
     chip.addEventListener("click", () => {
       const filter = chip.getAttribute("data-filter");
       triggerEnvReeval(filter);
+    });
+  });
+
+  // Stream Quality Chips
+  document.querySelectorAll(".quality-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const q = chip.getAttribute("data-quality");
+      if (!q) return;
+      state.streamQuality = q;
+      document.querySelectorAll(".quality-chip").forEach((c) => {
+        c.classList.toggle("active", c === chip);
+      });
     });
   });
 
@@ -528,6 +542,7 @@ async function toggleLiveWebcam() {
           formData.append("yolo_conf", state.yoloConf);
           formData.append("env_filter", state.envFilter);
           formData.append("is_live", "1");
+          formData.append("stream_quality", state.streamQuality);
 
           const res = await fetch("/api/detect", { method: "POST", body: formData });
           if (res.ok) {
@@ -553,7 +568,12 @@ async function toggleLiveWebcam() {
         const res = await fetch("/api/detect_realsense", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ yolo_conf: state.yoloConf, env_filter: state.envFilter, is_live: true }),
+          body: JSON.stringify({
+            yolo_conf: state.yoloConf,
+            env_filter: state.envFilter,
+            is_live: true,
+            stream_quality: state.streamQuality,
+          }),
         });
         const data = await res.json();
         if (res.ok && !data.error) {
@@ -610,7 +630,12 @@ async function toggleRealSense() {
       const res = await fetch("/api/detect_realsense", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ yolo_conf: state.yoloConf, env_filter: state.envFilter, is_live: true }),
+        body: JSON.stringify({
+          yolo_conf: state.yoloConf,
+          env_filter: state.envFilter,
+          is_live: true,
+          stream_quality: state.streamQuality,
+        }),
       });
       const data = await res.json();
       if (res.ok && !data.error) {

@@ -1392,7 +1392,9 @@ body {
 .env-stress-bar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
   background: rgba(14, 20, 29, 0.7);
   border: 1px solid var(--border-dim);
   border-radius: 8px;
@@ -1402,6 +1404,14 @@ body {
 .cmp-env-bar {
   margin-top: 10px;
   margin-bottom: 16px;
+  justify-content: flex-start;
+}
+.env-bar-group,
+.quality-bar-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 .env-bar-label {
   font-size: 11px;
@@ -1411,12 +1421,14 @@ body {
   letter-spacing: 0.6px;
   white-space: nowrap;
 }
-.env-chips {
+.env-chips,
+.quality-chips {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
 }
-.env-chip {
+.env-chip,
+.quality-chip {
   background: rgba(20, 30, 45, 0.6);
   border: 1px solid var(--border-dim);
   color: var(--text-muted);
@@ -1427,11 +1439,13 @@ body {
   cursor: pointer;
   transition: all var(--transition-fast);
 }
-.env-chip:hover {
+.env-chip:hover,
+.quality-chip:hover {
   border-color: var(--color-cyan);
   color: #fff;
 }
-.env-chip.active {
+.env-chip.active,
+.quality-chip.active {
   background: rgba(0, 200, 255, 0.15);
   border-color: var(--color-cyan);
   color: var(--color-cyan);
