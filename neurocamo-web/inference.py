@@ -68,8 +68,8 @@ TEXTURE_HIGH_CUTOFF = 400.0
 def texture_score(bgr_img: np.ndarray) -> float:
     """Laplacian variance = how complex/organic the image texture is."""
     h, w = bgr_img.shape[:2]
-    if max(h, w) > 128:
-        small = cv2.resize(bgr_img, (128, 128), interpolation=cv2.INTER_NEAREST)
+    if max(h, w) > 64:
+        small = cv2.resize(bgr_img, (64, 64), interpolation=cv2.INTER_NEAREST)
     else:
         small = bgr_img
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
@@ -136,7 +136,7 @@ class ModelBundle:
     def __init__(self) -> None:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.encoder = PoissonEncoder(timesteps=TIMESTEPS, gain=1.0).to(self.device)
-        self.encoder_live = PoissonEncoder(timesteps=4, gain=1.0).to(self.device)
+        self.encoder_live = PoissonEncoder(timesteps=2, gain=1.0).to(self.device)
 
         ckpt = None
         if os.path.exists(CHECKPOINT_PATH):
@@ -267,7 +267,7 @@ def run_inference(bundle: ModelBundle, bgr: np.ndarray, is_live: bool = False) -
     resized = cv2.resize(orig_rgb, (INPUT_SIZE, INPUT_SIZE)).astype(np.float32) / 255.0
     tensor = torch.from_numpy(resized).permute(2, 0, 1).unsqueeze(0).to(bundle.device)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         encoder = bundle.encoder_live if is_live and hasattr(bundle, "encoder_live") else bundle.encoder
         spikes = encoder(tensor)
         spikes_l3, mem_l3, sparsity = bundle.model.backbone(spikes)
@@ -289,27 +289,22 @@ def run_inference(bundle: ModelBundle, bgr: np.ndarray, is_live: bool = False) -
     snn_conf = float(conf_pred[0].item())
 
     # Step 3 — camouflage scene gate.
-    #
-    # The gate exists only because the v2/v3 global-MLP head emitted ~0.998
-    # objectness on literally any input, so a hand-written scene filter was the
-    # only thing separating a hit from a miss. The v4 mask head produces a real
-    # per-cell objectness, and these heuristics actively destroy correct
-    # detections in flat or bright scenes (a snow hare, a sky-lined drone), so
-    # they are bypassed entirely for the dense head.
-    plain_bg = background_is_plain(bgr)
-    sky = has_open_sky(bgr)
-
     if bundle.dense:
+        plain_bg = False
+        sky = False
         tex_weight = 1.0
         gate_reason = "Dense mask head - objectness read from the heatmap, no scene gate"
-    elif plain_bg:
-        tex_weight, gate_reason = 0.0, "Plain backdrop - product-style photo, not a camo scene"
-    elif sky:
-        tex_weight, gate_reason = 0.0, "Open sky in frame - subject is not ground-concealed"
-    elif tex < 300.0:
-        tex_weight, gate_reason = 0.0, "Texture too flat - no organic concealment structure"
     else:
-        tex_weight, gate_reason = 1.0, "Ground-level complex scene - camouflage candidate"
+        plain_bg = background_is_plain(bgr)
+        sky = has_open_sky(bgr)
+        if plain_bg:
+            tex_weight, gate_reason = 0.0, "Plain backdrop - product-style photo, not a camo scene"
+        elif sky:
+            tex_weight, gate_reason = 0.0, "Open sky in frame - subject is not ground-concealed"
+        elif tex < 300.0:
+            tex_weight, gate_reason = 0.0, "Texture too flat - no organic concealment structure"
+        else:
+            tex_weight, gate_reason = 1.0, "Ground-level complex scene - camouflage candidate"
 
     conf = snn_conf * tex_weight
 
