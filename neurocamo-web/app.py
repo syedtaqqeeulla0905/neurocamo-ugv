@@ -233,7 +233,10 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
     h, w = bgr.shape[:2]
     long_edge = max(h, w)
     sq = (stream_quality or "high").lower()
-    if sq == "fast":
+    if sq in ("1080p", "fhd"):
+        max_edge = 1920
+        jpeg_qual = 85
+    elif sq == "fast":
         max_edge = 424
         jpeg_qual = 50
     elif sq == "medium":
