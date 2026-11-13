@@ -22,6 +22,13 @@ import cv2
 import numpy as np
 import torch
 
+# Maximize multi-core utilization on ARM / Jetson CPU (use all available cores)
+try:
+    _n_threads = max(1, os.cpu_count() or 4)
+    torch.set_num_threads(_n_threads)
+except Exception:
+    pass
+
 # ── Locate the NeuroCamo project so its modules import unchanged ─────────────
 NEUROCAMO_ROOT = os.environ.get(
     "NEUROCAMO_ROOT",
@@ -60,8 +67,13 @@ TEXTURE_HIGH_CUTOFF = 400.0
 
 def texture_score(bgr_img: np.ndarray) -> float:
     """Laplacian variance = how complex/organic the image texture is."""
-    gray = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2GRAY)
-    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    h, w = bgr_img.shape[:2]
+    if max(h, w) > 128:
+        small = cv2.resize(bgr_img, (128, 128), interpolation=cv2.INTER_NEAREST)
+    else:
+        small = bgr_img
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_32F).var())
 
 
 def background_is_plain(bgr_img: np.ndarray, corner_size: int = 50, threshold: float = 15.0) -> bool:
@@ -124,6 +136,7 @@ class ModelBundle:
     def __init__(self) -> None:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.encoder = PoissonEncoder(timesteps=TIMESTEPS, gain=1.0).to(self.device)
+        self.encoder_live = PoissonEncoder(timesteps=4, gain=1.0).to(self.device)
 
         ckpt = None
         if os.path.exists(CHECKPOINT_PATH):
@@ -234,7 +247,7 @@ VERDICT_STYLE = {
 }
 
 
-def run_inference(bundle: ModelBundle, bgr: np.ndarray) -> dict:
+def run_inference(bundle: ModelBundle, bgr: np.ndarray, is_live: bool = False) -> dict:
     """Run the NeuroCamo SNN on one decoded BGR image.
 
     Returns a JSON-serialisable dict plus an 'annotated_rgb' numpy array that
@@ -255,7 +268,8 @@ def run_inference(bundle: ModelBundle, bgr: np.ndarray) -> dict:
     tensor = torch.from_numpy(resized).permute(2, 0, 1).unsqueeze(0).to(bundle.device)
 
     with torch.no_grad():
-        spikes = bundle.encoder(tensor)
+        encoder = bundle.encoder_live if is_live and hasattr(bundle, "encoder_live") else bundle.encoder
+        spikes = encoder(tensor)
         spikes_l3, mem_l3, sparsity = bundle.model.backbone(spikes)
         fused = bundle.model.asab(spikes_l3, mem_l3)
         if bundle.dense:
@@ -270,7 +284,7 @@ def run_inference(bundle: ModelBundle, bgr: np.ndarray) -> dict:
             heat = None
 
     xc, yc, bw, bh = [float(v) for v in bbox_pred[0].cpu().numpy()]
-    spec = spike_spectrogram(spikes_l3)
+    spec = None if is_live else spike_spectrogram(spikes_l3)
 
     snn_conf = float(conf_pred[0].item())
 
