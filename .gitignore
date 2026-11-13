@@ -21,7 +21,13 @@ venv/
 python-3.11.9-amd64.exe
 
 # Ignore OS / Editor junk
+.gcs_profile/
+.gcs_edge_profile/
 .DS_Store
 Thumbs.db
 *.tmp
 *.log
+
+scratch/
+removed_junk_images/
+*.onnx

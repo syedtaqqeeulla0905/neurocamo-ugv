@@ -127,17 +127,17 @@ body {
 
 .nav-tab {
   background: none;
-  border: none;
+  border: 1px solid transparent;
   color: var(--text-muted);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  padding: 6px 14px;
+  letter-spacing: 0.04em;
+  padding: 7px 16px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 8px;
   transition: all 0.15s ease;
 }
 
@@ -151,10 +151,6 @@ body {
   background-color: var(--bg-card);
   border: 1px solid var(--border-bright);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-}
-
-.tab-icon {
-  font-size: 14px;
 }
 
 /* ── Status & Header Actions ───────────────────────────────────────────────── */
@@ -456,6 +452,8 @@ body {
 }
 
 .feed-img {
+  width: 100%;
+  height: 100%;
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
@@ -463,7 +461,11 @@ body {
 }
 
 .feed-img.visible {
-  display: block;
+  display: block !important;
+}
+
+.frame-placeholder.hidden {
+  display: none !important;
 }
 
 .frame-placeholder {
@@ -472,19 +474,6 @@ body {
   align-items: center;
   justify-content: center;
   color: var(--text-muted);
-}
-
-.radar-scan {
-  width: 60px;
-  height: 60px;
-  border-radius: 50%;
-  border: 2px dashed rgba(0, 210, 255, 0.3);
-  margin-bottom: 12px;
-  animation: spin 10s linear infinite;
-}
-
-@keyframes spin {
-  100% { transform: rotate(360deg); }
 }
 
 .placeholder-text {
@@ -851,78 +840,13 @@ body {
   color: var(--text-muted);
 }
 
-.graph-selector-tabs {
-  display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--border-dim);
-  margin-bottom: 18px;
-}
-
-.graph-tab-btn {
-  background-color: var(--bg-card);
+#latencyCanvas, #energyCanvas {
+  width: 100%;
+  height: 190px;
+  background-color: #06080b;
   border: 1px solid var(--border-dim);
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 14px;
   border-radius: var(--radius-sm);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.15s ease;
-}
-
-.graph-tab-btn:hover {
-  color: var(--text-main);
-  border-color: var(--border-bright);
-}
-
-.graph-tab-btn.active {
-  background-color: rgba(0, 210, 255, 0.15);
-  border-color: var(--color-cyan);
-  color: #fff;
-}
-
-.graph-viewer-stage {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.graph-meta-banner {
-  width: 100%;
-  margin-bottom: 14px;
-}
-
-.graph-title-text {
-  font-size: 15px;
-  font-weight: 700;
-  color: #fff;
-}
-
-.graph-desc-text {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 2px;
-}
-
-.graph-img-wrap {
-  width: 100%;
-  background-color: #fff;
-  border-radius: var(--radius-sm);
-  padding: 10px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-}
-
-#graphImg {
-  max-width: 100%;
-  height: auto;
-  max-height: 480px;
-  object-fit: contain;
+  display: block;
 }
 
 /* ── VIEW 4: UGV TELEMETRY & HARDWARE CONTROL ──────────────────────────────── */
@@ -1136,3 +1060,806 @@ body {
 .text-amber { color: var(--color-amber); }
 .text-crimson { color: var(--color-crimson); }
 .text-muted { color: var(--text-muted); }
+.no-pad { padding: 0 !important; }
+
+/* ── Live SNN vs YOLOv8 Head-to-Head Comparison View ───────────────────────── */
+.compare-quick-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  background-color: var(--bg-panel);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-sm);
+  padding: 10px 16px;
+  margin-bottom: 20px;
+}
+
+.compare-bar-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--color-cyan);
+}
+
+.compare-sample-btns {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cmp-sample-btn.active {
+  border-color: var(--color-cyan);
+  background-color: rgba(0, 210, 255, 0.12);
+  color: #fff;
+}
+
+.compare-stage {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.cmp-card {
+  position: relative;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: border-color 0.2s ease;
+}
+
+.snn-cmp-card {
+  border: 1px solid rgba(0, 229, 160, 0.35);
+  box-shadow: 0 0 20px rgba(0, 229, 160, 0.06);
+}
+
+.yolo-cmp-card {
+  border: 1px solid rgba(255, 68, 85, 0.35);
+  box-shadow: 0 0 20px rgba(255, 68, 85, 0.06);
+}
+
+.badge-status-snn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  background-color: rgba(0, 229, 160, 0.15);
+  border: 1px solid rgba(0, 229, 160, 0.5);
+  color: var(--color-emerald);
+  letter-spacing: 0.05em;
+}
+
+.badge-status-yolo {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  background-color: rgba(255, 68, 85, 0.15);
+  border: 1px solid rgba(255, 68, 85, 0.5);
+  color: var(--color-crimson);
+  letter-spacing: 0.05em;
+}
+
+.badge-status-yolo.detected {
+  background-color: rgba(245, 163, 0, 0.15);
+  border-color: rgba(245, 163, 0, 0.5);
+  color: var(--color-amber);
+}
+
+.dot-indicator.yolo-dot {
+  background-color: var(--color-crimson);
+}
+
+.cmp-frame-container {
+  height: 420px;
+  position: relative;
+}
+
+/* Tactical HUD Reticle Corner Brackets */
+.reticle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.snn-cmp-card .reticle { border-color: rgba(0, 229, 160, 0.6); }
+.yolo-cmp-card .reticle { border-color: rgba(255, 68, 85, 0.6); }
+
+.reticle-tl { top: 10px; left: 10px; border-top: 2px solid; border-left: 2px solid; }
+.reticle-tr { top: 10px; right: 10px; border-top: 2px solid; border-right: 2px solid; }
+.reticle-bl { bottom: 10px; left: 10px; border-bottom: 2px solid; border-left: 2px solid; }
+.reticle-br { bottom: 10px; right: 10px; border-bottom: 2px solid; border-right: 2px solid; }
+
+.cmp-card-footer {
+  background-color: #0b0e15;
+  border-top: 1px solid var(--border-dim);
+  padding: 12px 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.cmp-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stat-lbl {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+}
+
+.stat-val {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.highlight-emerald { color: var(--color-emerald) !important; font-weight: 700; }
+.highlight-crimson { color: var(--color-crimson) !important; font-weight: 700; }
+
+/* Quantitative Comparison Table */
+.cmp-matrix-card {
+  margin-top: 10px;
+}
+
+.cmp-matrix-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  text-align: left;
+}
+
+.cmp-matrix-table th {
+  background-color: #0b0e15;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.cmp-matrix-table td {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+.cmp-matrix-table tr:last-child td {
+  border-bottom: none;
+}
+
+.cmp-matrix-table tr:hover {
+  background-color: rgba(255, 255, 255, 0.02);
+}
+
+.tbl-param {
+  font-weight: 600;
+  color: #fff;
+  width: 25%;
+}
+
+.tbl-snn {
+  font-family: var(--font-mono);
+  color: var(--color-emerald);
+  width: 25%;
+}
+
+.tbl-yolo {
+  font-family: var(--font-mono);
+  color: #fca5a5;
+  width: 25%;
+}
+
+.tbl-adv {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  width: 25%;
+}
+
+/* ── Operation Mode Selector Dropdown ──────────────────────────────────────── */
+.mode-selector-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(14, 20, 29, 0.85);
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  padding: 4px 10px;
+}
+
+.mode-selector-label {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--color-cyan);
+  letter-spacing: 0.8px;
+}
+
+.mode-dropdown {
+  background: #090d14;
+  color: #e0e8f0;
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  outline: none;
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
+}
+
+.mode-dropdown:hover,
+.mode-dropdown:focus {
+  border-color: var(--color-cyan);
+}
+
+.mode-dropdown option {
+  background: #0d121a;
+  color: #e0e8f0;
+}
+
+/* ── YOLO Sensitivity Slider Controls ──────────────────────────────────────── */
+.yolo-slider-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(14, 20, 29, 0.85);
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  padding: 4px 12px;
+}
+
+.yolo-slider-label {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--color-amber);
+  letter-spacing: 0.6px;
+}
+
+.yolo-slider {
+  width: 100px;
+  cursor: pointer;
+  accent-color: var(--color-amber);
+}
+
+.yolo-slider-val {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: #fff;
+  min-width: 32px;
+  text-align: right;
+}
+
+
+
+/* ── Tactical Mission Dossier Button ────────────────────────────────────────── */
+.btn-dossier {
+  background: rgba(0, 229, 160, 0.12);
+  border: 1px solid rgba(0, 229, 160, 0.4);
+  color: var(--color-emerald);
+}
+.btn-dossier:hover {
+  background: rgba(0, 229, 160, 0.25);
+  border-color: var(--color-emerald);
+  color: #fff;
+}
+
+/* ── Environmental Optical Stress Testing Bar ───────────────────────────────── */
+.env-stress-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(14, 20, 29, 0.7);
+  border: 1px solid var(--border-dim);
+  border-radius: 8px;
+  padding: 8px 16px;
+  margin-bottom: 16px;
+}
+.cmp-env-bar {
+  margin-top: 10px;
+  margin-bottom: 16px;
+}
+.env-bar-label {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--color-cyan);
+  letter-spacing: 0.6px;
+  white-space: nowrap;
+}
+.env-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.env-chip {
+  background: rgba(20, 30, 45, 0.6);
+  border: 1px solid var(--border-dim);
+  color: var(--text-muted);
+  border-radius: 4px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.env-chip:hover {
+  border-color: var(--color-cyan);
+  color: #fff;
+}
+.env-chip.active {
+  background: rgba(0, 200, 255, 0.15);
+  border-color: var(--color-cyan);
+  color: var(--color-cyan);
+  font-weight: 700;
+  box-shadow: 0 0 10px rgba(0, 200, 255, 0.2);
+}
+
+/* ── Temporal Spike Evolution ($t_0 \to t_{16}$) ───────────────────────────── */
+.temporal-card {
+  margin-bottom: 24px;
+  border-left: 3px solid var(--color-emerald);
+}
+.temporal-controls {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.temporal-slider-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  background: rgba(10, 15, 24, 0.85);
+  padding: 8px 16px;
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+}
+.temporal-step-lbl {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--color-cyan);
+}
+.temporal-range-slider {
+  flex: 1;
+  cursor: pointer;
+  accent-color: var(--color-emerald);
+}
+.temporal-step-badge {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--color-emerald);
+  min-width: 80px;
+  text-align: right;
+}
+.temporal-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.t-metric-box {
+  background: rgba(12, 18, 28, 0.85);
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+.t-lbl {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+.t-val {
+  font-size: 16px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 2px;
+}
+.t-sub {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* ── Mission Tactical Dossier Modal & A4 Printable Sheet ───────────────────── */
+.modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(3, 6, 10, 0.88);
+  backdrop-filter: blur(6px);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  overflow-y: auto;
+}
+.dossier-window {
+  background: #0d121c;
+  border: 1px solid var(--border-dim);
+  border-radius: 8px;
+  width: 100%;
+  max-width: 960px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.7);
+  display: flex;
+  flex-direction: column;
+  max-height: 92vh;
+}
+.dossier-actions-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: #090d15;
+  border-bottom: 1px solid var(--border-dim);
+  border-radius: 8px 8px 0 0;
+}
+.dossier-title-bar {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--color-cyan);
+}
+.dossier-btn-group {
+  display: flex;
+  gap: 10px;
+}
+.dossier-sheet {
+  padding: 30px;
+  overflow-y: auto;
+  background: #fff;
+  color: #111;
+  font-family: 'Segoe UI', Arial, sans-serif;
+  line-height: 1.4;
+}
+.dossier-header {
+  border-bottom: 2px solid #000;
+  padding-bottom: 15px;
+  margin-bottom: 20px;
+}
+.dossier-stamp {
+  display: inline-block;
+  background: #d32f2f;
+  color: #fff;
+  font-family: var(--font-mono), monospace;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 1.5px;
+  padding: 3px 8px;
+  margin-bottom: 8px;
+}
+.dossier-agency {
+  font-size: 18px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  color: #0b1a2c;
+}
+.dossier-subhead {
+  font-size: 13px;
+  color: #444;
+  margin-bottom: 12px;
+}
+.dossier-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 20px;
+  font-size: 11px;
+  font-family: var(--font-mono), monospace;
+  color: #222;
+  background: #f4f6f8;
+  padding: 10px 14px;
+  border: 1px solid #d0d7de;
+}
+.dossier-section-title {
+  font-family: var(--font-mono), monospace;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  color: #003366;
+  border-bottom: 1px solid #003366;
+  padding-bottom: 4px;
+  margin-top: 22px;
+  margin-bottom: 12px;
+}
+.dossier-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+.dossier-img-box {
+  border: 1px solid #ccc;
+  background: #000;
+  padding: 4px;
+}
+.img-caption {
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono), monospace;
+  background: #eee;
+  color: #222;
+  padding: 4px;
+  text-align: center;
+  margin-bottom: 4px;
+}
+.dos-preview-img {
+  width: 100%;
+  height: 180px;
+  object-fit: contain;
+  display: block;
+}
+.dossier-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-top: 8px;
+}
+.dossier-table th {
+  background: #0b1a2c;
+  color: #fff;
+  font-family: var(--font-mono), monospace;
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+.dossier-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #e1e4e8;
+  font-size: 11px;
+}
+.dossier-table tr:nth-child(even) td {
+  background: #f8fafc;
+}
+.dossier-signatures {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  margin-top: 40px;
+  padding-top: 10px;
+}
+.sig-block {
+  text-align: center;
+}
+.sig-line {
+  border-bottom: 1px solid #000;
+  height: 40px;
+  margin-bottom: 6px;
+}
+.sig-role {
+  font-size: 11px;
+  font-weight: 700;
+  color: #111;
+}
+.sig-desc {
+  font-size: 9px;
+  color: #666;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .modal-backdrop, .dossier-window, .dossier-sheet, .dossier-sheet * {
+    visibility: visible;
+  }
+  .modal-backdrop {
+    position: static;
+    background: none;
+    padding: 0;
+  }
+  .dossier-actions-bar {
+    display: none !important;
+  }
+  .dossier-window {
+    border: none;
+    box-shadow: none;
+    max-width: 100%;
+  }
+  .dossier-sheet {
+    padding: 0;
+  }
+}
+
+/* ── Dual Time-Series Analyzer Styling ─────────────────────────────────────── */
+.time-series-legend {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.legend-line {
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.legend-line.emerald {
+  background: var(--color-emerald);
+  box-shadow: 0 0 6px rgba(0, 229, 160, 0.6);
+}
+.legend-line.crimson {
+  background: var(--color-crimson);
+  box-shadow: 0 0 6px rgba(255, 68, 85, 0.6);
+}
+.time-series-subcard {
+  background: rgba(10, 15, 23, 0.7);
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  padding: 14px;
+}
+.subcard-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+}
+.subcard-badge {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  background: rgba(0, 229, 160, 0.12);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 229, 160, 0.3);
+}
+
+/* ── Tactical Overlays, Live Webcam & STANAG GCS Styling ───────────────────── */
+.btn-cam-toggle {
+  background: rgba(0, 210, 255, 0.12);
+  border: 1px solid rgba(0, 210, 255, 0.4);
+  color: var(--color-cyan);
+}
+.btn-cam-toggle.streaming {
+  background: rgba(255, 68, 85, 0.25);
+  border-color: var(--color-crimson);
+  color: var(--color-crimson);
+  animation: pulse-cam 1.4s infinite;
+}
+@keyframes pulse-cam {
+  0% { box-shadow: 0 0 0 0 rgba(255, 68, 85, 0.4); }
+  70% { box-shadow: 0 0 0 8px rgba(255, 68, 85, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 68, 85, 0); }
+}
+
+.overlay-modes {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.overlay-lbl {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--color-cyan);
+}
+.overlay-btn {
+  background: rgba(15, 23, 36, 0.85);
+  border: 1px solid var(--border-dim);
+  color: var(--text-muted);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.overlay-btn:hover {
+  border-color: var(--color-cyan);
+  color: #fff;
+}
+.overlay-btn.active {
+  background: rgba(0, 229, 160, 0.18);
+  border-color: var(--color-emerald);
+  color: var(--color-emerald);
+  font-weight: 700;
+}
+
+/* STANAG 4586 / MAVLink Console */
+.tactical-gcs-console {
+  background: rgba(8, 12, 18, 0.88);
+  border: 1px solid var(--border-dim);
+  border-left: 3px solid var(--color-accent);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin-top: 20px;
+}
+.gcs-console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.gcs-console-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.8px;
+}
+.gcs-telemetry-grid {
+  display: grid;
+  grid-template-columns: 140px 140px 180px 160px 1fr;
+  gap: 12px;
+}
+.gcs-box {
+  background: rgba(13, 19, 29, 0.8);
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.gcs-packet-box {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.gcs-lbl {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+.gcs-val {
+  font-size: 15px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: #fff;
+}
+.gcs-sub {
+  font-size: 9px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.gcs-packet {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-emerald);
+  background: #030508;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 229, 160, 0.25);
+  display: inline-block;
+  overflow-x: auto;
+  white-space: nowrap;
+}

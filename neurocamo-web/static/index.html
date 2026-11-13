@@ -8,7 +8,7 @@
       name="description"
       content="Tactical Ground Control Station & Spiking Neural Network Analytics Suite for Edge Camouflage Reconnaissance."
     />
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=14.0" />
   </head>
   <body>
     <!-- Top Application Bar -->
@@ -25,27 +25,22 @@
         </div>
       </div>
 
+      <!-- View Mode Dropdown Selector -->
+      <div class="mode-selector-wrap">
+        <label for="modeSelect" class="mode-selector-label">VIEW MODE:</label>
+        <select id="modeSelect" class="mode-dropdown">
+          <option value="view-recon" selected>General Reconnaissance (Raw vs SNN Mask)</option>
+          <option value="view-compare">Live SNN vs YOLOv8-Nano Benchmark</option>
+        </select>
+      </div>
+
       <!-- Navigation Tabs -->
       <nav class="nav-tabs" id="navTabs">
-        <button class="nav-tab active" data-view="view-recon">
-          <span class="tab-icon">🎯</span>
-          <span class="tab-label">Reconnaissance</span>
-        </button>
         <button class="nav-tab" data-view="view-spikes">
-          <span class="tab-icon">🧠</span>
           <span class="tab-label">SNN Neuromorphic Core</span>
         </button>
         <button class="nav-tab" data-view="view-power">
-          <span class="tab-icon">⚡</span>
-          <span class="tab-label">Power & Efficiency</span>
-        </button>
-        <button class="nav-tab" data-view="view-telemetry">
-          <span class="tab-icon">🚗</span>
-          <span class="tab-label">UGV Telemetry & Control</span>
-        </button>
-        <button class="nav-tab" data-view="view-arch">
-          <span class="tab-icon">📐</span>
-          <span class="tab-label">Model Specs</span>
+          <span class="tab-label">Power &amp; Efficiency Analytics</span>
         </button>
       </nav>
 
@@ -55,22 +50,48 @@
           <span class="pulse-dot"></span>
           <span id="sysStatusText">JETSON EDGE READY</span>
         </div>
-        <label class="btn btn-primary" for="fileInput">
+        <button class="btn btn-secondary btn-cam-toggle" id="btnLiveCam" type="button" title="Toggle Live Laptop/Drone Webcam Stream">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="23 7 16 12 23 17 23 7" />
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+          </svg>
+          <span id="btnLiveCamText">Start Live Cam</span>
+        </button>
+        <button class="btn btn-secondary btn-cam-toggle" id="btnRealSense" type="button" title="Toggle Intel RealSense D435i Live Feed">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" />
+          </svg>
+          <span id="btnRealSenseText">RealSense Live</span>
+        </button>
+        <button class="btn btn-secondary btn-dossier" id="btnExportDossier" type="button" title="Generate printable Tactical Intelligence Dossier">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="16" y1="13" x2="8" y2="13" />
+            <line x1="16" y1="17" x2="8" y2="17" />
+            <polyline points="10 9 9 9 8 9" />
+          </svg>
+          Export Dossier
+        </button>
+        <button class="btn btn-primary" id="btnUploadHeader" type="button">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
             <polyline points="17 8 12 3 7 8" />
             <line x1="12" y1="3" x2="12" y2="15" />
           </svg>
           Upload Frame
-          <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.bmp,.webp" hidden />
-        </label>
+        </button>
+            <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.bmp,.webp" style="display: none;" />
+    <video id="webcamVideo" autoplay playsinline muted style="display: none;"></video>
+    <canvas id="webcamCaptureCanvas" style="display: none;"></canvas>
       </div>
     </header>
 
     <!-- Main Content Area -->
     <main class="app-main">
       <!-- ═══════════════════════════════════════════════════════════════ -->
-      <!-- VIEW 1: RECONNAISSANCE & LIVE DETECTION                         -->
+      <!-- VIEW 0: GENERAL TACTICAL RECONNAISSANCE (RAW vs SNN MASK)       -->
       <!-- ═══════════════════════════════════════════════════════════════ -->
       <section class="view active" id="view-recon">
         <!-- Sample Gallery Bar -->
@@ -78,6 +99,17 @@
           <div class="section-tag">VERIFIED TEST SAMPLES (ONE-CLICK SNN INFERENCE)</div>
           <div class="sample-carousel" id="sampleCarousel">
             <!-- Dynamically populated from /api/samples -->
+          </div>
+        </div>
+
+        <!-- Environmental Stress Testing Strip -->
+        <div class="env-stress-bar">
+          <span class="env-bar-label">OPTICAL STRESS FILTER:</span>
+          <div class="env-chips">
+            <button class="env-chip active" data-filter="normal">Normal Optics</button>
+            <button class="env-chip" data-filter="dusk">Low Light / Dusk</button>
+            <button class="env-chip" data-filter="smoke">Battlefield Smoke &amp; Fog</button>
+            <button class="env-chip" data-filter="noise">Sensor Noise (ISO Grain)</button>
           </div>
         </div>
 
@@ -105,15 +137,22 @@
           <div class="feed-card">
             <div class="card-header">
               <div class="card-title">
-                <span class="dot-indicator tactical"></span> SNN TACTICAL DETECTION & LOCALIZATION
+                <span class="dot-indicator tactical"></span> SNN TACTICAL DETECTION &amp; LOCALIZATION
               </div>
-              <div class="card-meta" id="detMeta">best_model_v4 (Dense Spatial Mask)</div>
+              <!-- Tactical False-Color Overlay Selector -->
+              <div class="overlay-modes" id="reconOverlayModes">
+                <span class="card-meta" id="detMeta" style="margin-right: 6px;">best_model_v4</span>
+                <span class="overlay-lbl">LAYER:</span>
+                <button class="overlay-btn active" data-overlay="box">Target Box</button>
+                <button class="overlay-btn" data-overlay="saliency">Saliency Heatmap (JET)</button>
+                <button class="overlay-btn" data-overlay="mask">Camo Penetration</button>
+              </div>
             </div>
             <div class="card-body frame-container">
               <img id="detImg" class="feed-img" alt="SNN Detection" />
               <div class="frame-placeholder" id="detPlaceholder">
                 <div class="placeholder-text">SNN Inference Idle</div>
-                <div class="placeholder-hint">Rate coding & spike generation on trigger</div>
+                <div class="placeholder-hint">Rate coding &amp; spike generation on trigger</div>
               </div>
             </div>
           </div>
@@ -148,18 +187,181 @@
           </div>
 
           <div class="telemetry-box action-box">
-            <button class="btn btn-accent" id="btnGoSpikes">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-              </svg>
+            <button class="btn btn-accent" id="btnGoCompare" type="button">
+              Compare vs YOLOv8 →
+            </button>
+            <button class="btn btn-secondary" id="btnGoSpikes" type="button">
               Inspect Spikes in Core →
             </button>
-            <button class="btn btn-secondary" id="btnGoPower">
-              View Power Profile →
+            <button class="btn btn-secondary" id="btnGoPower" type="button">
+              Power Profile →
             </button>
           </div>
         </div>
       </section>
+
+      <!-- ═══════════════════════════════════════════════════════════════ -->
+      <!-- VIEW 1: LIVE SNN vs YOLOV8 BENCHMARK (PRIMARY RECON STATION)    -->
+      <!-- ═══════════════════════════════════════════════════════════════ -->
+      <section class="view" id="view-compare">
+        <div class="view-header">
+          <div>
+            <h2 class="view-title">Live SNN vs YOLOv8-Nano Head-to-Head Benchmark</h2>
+            <p class="view-desc">
+              Empirical side-by-side evaluation: Neuromorphic Event-Driven SNN (Our Model) vs Conventional Dense CNN (YOLOv8-Nano) on identical optical inputs.
+            </p>
+          </div>
+          <div class="header-right-actions">
+            <span class="hud-pill"><span class="pill-dot emerald"></span> SNN: <span id="hdrSnnPower">0.91W</span></span>
+            <span class="hud-pill"><span class="pill-dot crimson"></span> YOLO: <span id="hdrYoloPower">8.70W (9.5x)</span></span>
+          </div>
+        </div>
+
+        <!-- Sample Selector Strip for Quick Comparison -->
+        <div class="compare-quick-bar">
+          <span class="compare-bar-label">TARGET SCENARIO:</span>
+          <div class="compare-sample-btns" id="compareSampleBtns">
+            <button class="btn btn-sm btn-secondary cmp-sample-btn active" data-sample="camo_marine">Marine Batfish (Benthic)</button>
+            <button class="btn btn-sm btn-secondary cmp-sample-btn" data-sample="camo_ghillie1">Tactical Ghillie Sniper</button>
+            <button class="btn btn-sm btn-secondary cmp-sample-btn" data-sample="camo_chameleon">Arboreal Chameleon</button>
+            <button class="btn btn-sm btn-secondary cmp-sample-btn" data-sample="camo_woodland">Woodland Recon Operative</button>
+          </div>
+
+          <!-- Real-Time YOLO Sensitivity Slider -->
+          <div class="yolo-slider-wrap">
+            <span class="yolo-slider-label">YOLO THRESHOLD:</span>
+            <input type="range" id="yoloConfSlider" min="5" max="50" step="1" value="15" class="yolo-slider" title="Adjust YOLOv8 candidate detection confidence threshold" />
+            <span class="yolo-slider-val" id="yoloConfVal">15%</span>
+          </div>
+
+          <button class="btn btn-sm btn-primary" id="btnUploadCompare" type="button">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+            Upload Custom Frame
+          </button>
+          <input type="file" id="cmpFileInput" accept=".jpg,.jpeg,.png,.bmp,.webp" style="display: none;" />
+        </div>
+
+        <!-- Environmental Stress Testing Strip for Head-to-Head -->
+        <div class="env-stress-bar cmp-env-bar">
+          <span class="env-bar-label">OPTICAL STRESS FILTER:</span>
+          <div class="env-chips">
+            <button class="env-chip active" data-filter="normal">Normal Optics</button>
+            <button class="env-chip" data-filter="dusk">Low Light / Dusk</button>
+            <button class="env-chip" data-filter="smoke">Battlefield Smoke &amp; Fog</button>
+            <button class="env-chip" data-filter="noise">Sensor Noise (ISO Grain)</button>
+          </div>
+        </div>
+
+        <!-- Dual Side-by-Side Comparison Feed Stage -->
+        <div class="compare-stage">
+          <!-- Left Feed: NeuroCamo SNN -->
+          <div class="feed-card cmp-card snn-cmp-card">
+            <div class="card-header">
+              <div class="card-title">
+                <span class="dot-indicator tactical"></span> NEUROCAMO SNN (PROPOSED EVENT-DRIVEN)
+              </div>
+              <div class="overlay-modes" id="cmpOverlayModes">
+                <span class="overlay-lbl">OVERLAY:</span>
+                <button class="overlay-btn active" data-overlay="box">Target Lock</button>
+                <button class="overlay-btn" data-overlay="saliency">JET Spectrum</button>
+                <button class="overlay-btn" data-overlay="mask">Camo Mask</button>
+              </div>
+              <div class="badge-status-snn" id="cmpSnnBadge">INITIALIZING LIVE MODEL...</div>
+            </div>
+            <div class="card-body frame-container cmp-frame-container">
+              <div class="reticle reticle-tl"></div>
+              <div class="reticle reticle-tr"></div>
+              <div class="reticle reticle-bl"></div>
+              <div class="reticle reticle-br"></div>
+              <img id="cmpSnnImg" class="feed-img" alt="SNN Detection" />
+              <div class="frame-placeholder" id="cmpSnnPlaceholder">
+                <div class="placeholder-text">PROCESSING LIVE SNN STREAM...</div>
+                <div class="placeholder-hint">Poisson rate coding and spatial mask localization</div>
+              </div>
+            </div>
+            <div class="cmp-card-footer">
+              <div class="cmp-stat"><span class="stat-lbl">HEAD ARCHITECTURE:</span><span class="stat-val">Dense Mask (LIF Conv)</span></div>
+              <div class="cmp-stat"><span class="stat-lbl">EDGE POWER:</span><span class="stat-val highlight-emerald" id="cmpSnnPower">-- W</span></div>
+              <div class="cmp-stat"><span class="stat-lbl">SYNAPTIC ENERGY:</span><span class="stat-val highlight-emerald" id="cmpSnnEnergy">-- mJ</span></div>
+              <div class="cmp-stat"><span class="stat-lbl">SPARSITY:</span><span class="stat-val highlight-emerald" id="cmpSnnSparsity">--% Silent</span></div>
+              <div class="cmp-stat"><span class="stat-lbl">LATENCY:</span><span class="stat-val" id="cmpSnnLatency">-- ms</span></div>
+            </div>
+          </div>
+
+          <!-- Right Feed: YOLOv8-Nano Baseline -->
+          <div class="feed-card cmp-card yolo-cmp-card">
+            <div class="card-header">
+              <div class="card-title">
+                <span class="dot-indicator yolo-dot"></span> CONVENTIONAL YOLOV8-NANO (DENSE CNN)
+              </div>
+              <div class="badge-status-yolo" id="cmpYoloBadge">INITIALIZING LIVE MODEL...</div>
+            </div>
+            <div class="card-body frame-container cmp-frame-container">
+              <div class="reticle reticle-tl"></div>
+              <div class="reticle reticle-tr"></div>
+              <div class="reticle reticle-bl"></div>
+              <div class="reticle reticle-br"></div>
+              <img id="cmpYoloImg" class="feed-img" alt="YOLOv8 Detection" />
+              <div class="frame-placeholder" id="cmpYoloPlaceholder">
+                <div class="placeholder-text">PROCESSING LIVE YOLO STREAM...</div>
+                <div class="placeholder-hint">Standard CNN bounding box detector</div>
+              </div>
+            </div>
+            <div class="cmp-card-footer">
+              <div class="cmp-stat"><span class="stat-lbl">MODEL:</span><span class="stat-val">Ultralytics YOLOv8-Nano</span></div>
+              <div class="cmp-stat"><span class="stat-lbl">EDGE POWER:</span><span class="stat-val highlight-crimson" id="cmpYoloPower">-- W</span></div>
+              <div class="cmp-stat"><span class="stat-lbl">INFERENCE ENERGY:</span><span class="stat-val highlight-crimson" id="cmpYoloEnergy">-- mJ</span></div>
+              <div class="cmp-stat"><span class="stat-lbl">COMPUTATION:</span><span class="stat-val highlight-crimson" id="cmpYoloOps">8.70 GFLOPs (Dense)</span></div>
+              <div class="cmp-stat"><span class="stat-lbl">LATENCY:</span><span class="stat-val" id="cmpYoloLatency">-- ms</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- STANAG 4586 / MAVLink Tactical GCS Actuator & Telemetry Console -->
+        <div class="tactical-gcs-console">
+          <div class="gcs-console-header">
+            <div class="gcs-console-title">
+              <span class="pulse-dot"></span> NATO STANAG 4586 / MAVLINK TARGET TELEMETRY &amp; GIMBAL ACTUATOR
+            </div>
+            <div class="gcs-actions">
+              <button class="btn btn-sm btn-accent" id="btnSlewCue" type="button">PTZ SLEW-TO-CUE (INTERCEPT)</button>
+            </div>
+          </div>
+
+          <div class="gcs-telemetry-grid">
+            <div class="gcs-box">
+              <div class="gcs-lbl">TARGET AZIMUTH (θ)</div>
+              <div class="gcs-val highlight-cyan" id="gcsAzimuth">+0.0°</div>
+              <div class="gcs-sub">Optical Centerline Offset</div>
+            </div>
+            <div class="gcs-box">
+              <div class="gcs-lbl">TARGET ELEVATION (φ)</div>
+              <div class="gcs-val highlight-cyan" id="gcsElevation">+0.0°</div>
+              <div class="gcs-sub">Vertical Gimbal Angle</div>
+            </div>
+            <div class="gcs-box">
+              <div class="gcs-lbl">ESTIMATED STANDOFF RANGE</div>
+              <div class="gcs-val highlight-emerald" id="gcsRange">-- m</div>
+              <div class="gcs-sub">Pinhole Optical Telemetry</div>
+            </div>
+            <div class="gcs-box">
+              <div class="gcs-lbl">TARGET FOOTPRINT</div>
+              <div class="gcs-val" id="gcsFootprint">-- m²</div>
+              <div class="gcs-sub">Projected Spatial Saliency</div>
+            </div>
+            <div class="gcs-box gcs-packet-box">
+              <div class="gcs-lbl">ENCRYPTED TELEMETRY BUS PACKET (STANAG 4586)</div>
+              <code class="gcs-packet" id="gcsPacket">$STANAG,TRT:01,AZ:+0.00,EL:+0.00,RNG:0.0m,STAT:STANDBY*1A</code>
+              <div class="gcs-sub" id="gcsPacketStatus">Live RS-422 / Serial Gimbal Link: Standby</div>
+            </div>
+          </div>
+        </div>
+
+        </section>
 
       <!-- ═══════════════════════════════════════════════════════════════ -->
       <!-- VIEW 2: SNN NEUROMORPHIC CORE                                   -->
@@ -203,6 +405,53 @@
               <div class="spec-hover-readout" id="specHoverReadout">
                 Hover over the spike matrix to inspect channel firing rates.
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Temporal Spike Evolution Scrubber & Saliency Emergence Card -->
+        <div class="panel-card temporal-card">
+          <div class="card-header">
+            <div class="card-title">
+              <span class="dot-indicator tactical"></span> TEMPORAL SPIKE INTEGRATION &amp; SALIENCY EMERGENCE (t₁ → t₁₆)
+            </div>
+            <div class="card-meta">Biological LIF Membrane Potential: U[t] = β·U[t-1] + W·S[t]</div>
+          </div>
+          <div class="card-body">
+            <div class="temporal-controls">
+              <button class="btn btn-sm btn-accent" id="btnPlayTemporal" type="button">PLAY TIMESTEPS</button>
+              <div class="temporal-slider-wrap">
+                <span class="temporal-step-lbl">TIMESTEP:</span>
+                <input type="range" id="temporalSlider" min="1" max="16" step="1" value="16" class="temporal-range-slider" />
+                <span class="temporal-step-badge" id="temporalStepVal">t = 16 / 16</span>
+              </div>
+            </div>
+
+            <div class="temporal-metrics-grid">
+              <div class="t-metric-box">
+                <div class="t-lbl">STAGE DYNAMICS</div>
+                <div class="t-val highlight-cyan" id="temporalStage">Dense Mask Convergence</div>
+                <div class="t-sub" id="temporalStageSub">Target boundary fully stabilized</div>
+              </div>
+              <div class="t-metric-box">
+                <div class="t-lbl">CONFIDENCE AT t</div>
+                <div class="t-val highlight-emerald" id="temporalConfVal">0.0%</div>
+                <div class="t-sub">Accumulated objectness readout</div>
+              </div>
+              <div class="t-metric-box">
+                <div class="t-lbl">LAYER-3 ACCUMULATED SPIKES</div>
+                <div class="t-val" id="temporalSpikesVal">--</div>
+                <div class="t-sub">Total synaptic events firing</div>
+              </div>
+              <div class="t-metric-box">
+                <div class="t-lbl">PEAK MEMBRANE CHARGE</div>
+                <div class="t-val" id="temporalPeakVal">--</div>
+                <div class="t-sub">Leaky integrate threshold V_th = 1.0</div>
+              </div>
+            </div>
+            
+            <div class="card-note">
+              Temporal progression proves genuine neuromorphic integration: initial Poisson random noise (t=1) rapidly integrates through the 3 LIF layers into a sharp spatial boundary (t=8 → 16) without frame re-inference.
             </div>
           </div>
         </div>
@@ -338,23 +587,103 @@
           </div>
         </div>
 
-        <!-- Research Paper Publication Figures -->
-        <div class="panel-card" style="margin-top: 20px;">
+        <!-- Dual Time-Series Analyzer: Power (Watts) & Latency (ms) -->
+        <div class="panel-card" style="margin-top: 20px; border-left: 3px solid var(--color-cyan);">
           <div class="card-header">
-            <div class="card-title">PUBLICATION RESEARCH FIGURES (300 DPI ARTIFACTS)</div>
-            <div class="card-meta">Peer-Reviewed Experimental Plots</div>
+            <div>
+              <div class="card-title">
+                <span class="dot-indicator tactical"></span> DUAL LIVE TIME-SERIES ANALYZER: SNN vs YOLOV8-NANO
+              </div>
+              <div class="card-meta">Real-time Comparative Hardware Profiler (Jetson Nano 10W Profile)</div>
+            </div>
+            <div class="time-series-legend">
+              <span class="legend-chip"><span class="legend-line emerald"></span> NeuroCamo SNN (Our Model)</span>
+              <span class="legend-chip"><span class="legend-line crimson"></span> Conventional YOLOv8-Nano (Dense CNN)</span>
+            </div>
           </div>
           <div class="card-body">
-            <div class="graph-selector-tabs" id="graphTabs">
-              <!-- Populated dynamically from /api/graphs -->
-            </div>
-            <div class="graph-viewer-stage">
-              <div class="graph-meta-banner">
-                <div class="graph-title-text" id="graphTitle">Loading figure...</div>
-                <div class="graph-desc-text" id="graphDesc">Figure description</div>
+            <div class="grid-2-col">
+              <!-- Graph 1: Power Consumption (Watts) Trace -->
+              <div class="time-series-subcard">
+                <div class="subcard-title">
+                  <span>1. CONTINUOUS POWER DRAW (WATTS)</span>
+                  <span class="subcard-badge text-emerald" id="livePwrAdv">9.1× Lower Draw</span>
+                </div>
+                <canvas id="powerTraceCanvas" width="540" height="200"></canvas>
+                <div class="sparsity-stats-row" style="margin-top: 12px;">
+                  <div class="stat-pill">
+                    <div class="stat-val text-emerald" id="liveSnnPwrVal">0.97 W</div>
+                    <div class="stat-lbl">SNN Event-Driven Power</div>
+                    <div class="stat-sub">Spike activity dependent</div>
+                  </div>
+                  <div class="stat-pill">
+                    <div class="stat-val text-crimson" id="liveYoloPwrVal">8.85 W</div>
+                    <div class="stat-lbl">YOLOv8 Dense Power</div>
+                    <div class="stat-sub">100% Tensor Core load</div>
+                  </div>
+                  <div class="stat-pill">
+                    <div class="stat-val text-cyan" id="livePwrRatioVal">9.1×</div>
+                    <div class="stat-lbl">Power Conservation</div>
+                    <div class="stat-sub">Dynamic wattage delta</div>
+                  </div>
+                </div>
               </div>
-              <div class="graph-img-wrap">
-                <img id="graphImg" alt="Research Figure" />
+
+              <!-- Graph 2: Inference Latency (ms) Trace -->
+              <div class="time-series-subcard">
+                <div class="subcard-title">
+                  <span>2. REAL-TIME EDGE LATENCY &amp; FPS</span>
+                  <span class="subcard-badge text-cyan" id="liveLatAdv">3.2× Speedup</span>
+                </div>
+                <canvas id="latencyCanvas" width="540" height="200"></canvas>
+                <div class="sparsity-stats-row" style="margin-top: 12px;">
+                  <div class="stat-pill">
+                    <div class="stat-val text-emerald" id="liveLatencyVal">16.1 ms</div>
+                    <div class="stat-lbl">SNN Latency (~62 FPS)</div>
+                    <div class="stat-sub">Poisson temporal stream</div>
+                  </div>
+                  <div class="stat-pill">
+                    <div class="stat-val text-crimson" id="liveYoloLatencyVal">52.3 ms</div>
+                    <div class="stat-lbl">YOLOv8 Latency (~19 FPS)</div>
+                    <div class="stat-sub">8.70 GFLOPs matrix dense</div>
+                  </div>
+                  <div class="stat-pill">
+                    <div class="stat-val text-cyan" id="liveLatRatioVal">3.2×</div>
+                    <div class="stat-lbl">Real-time Speedup</div>
+                    <div class="stat-sub">Jetson Nano edge execution</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="card-note" style="margin-top: 15px;">
+              Dual time-series analyzer plots rolling hardware execution across continuous optical frames. SNN dynamically modulates wattage based on synaptic sparsity (event-driven), whereas YOLO consumes constant high-power dense GEMM tensor operations.
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-2-col" style="margin-top: 20px;">
+
+          <!-- Dynamic Synaptic Energy & Spike Distribution -->
+          <div class="panel-card">
+            <div class="card-header">
+              <div class="card-title">DYNAMIC SYNAPTIC ENERGY PER FRAME</div>
+              <div class="card-meta">Real-time Horowitz CMOS Calculation</div>
+            </div>
+            <div class="card-body">
+              <canvas id="energyCanvas" width="540" height="190"></canvas>
+              <div class="sparsity-stats-row" style="margin-top: 14px;">
+                <div class="stat-pill">
+                  <div class="stat-val highlight" id="frameEnergyVal">0.0 mJ</div>
+                  <div class="stat-lbl">SNN Frame Energy</div>
+                </div>
+                <div class="stat-pill">
+                  <div class="stat-val text-crimson" id="annEnergyVal">0.0 mJ</div>
+                  <div class="stat-lbl">Dense ANN Baseline</div>
+                </div>
+                <div class="stat-pill">
+                  <div class="stat-val text-cyan" id="savingsFactorVal">0.0x</div>
+                  <div class="stat-lbl">Energy Reduction</div>
+                </div>
               </div>
             </div>
           </div>
@@ -362,256 +691,120 @@
       </section>
 
       <!-- ═══════════════════════════════════════════════════════════════ -->
-      <!-- VIEW 4: UGV TELEMETRY & HARDWARE CONTROL                        -->
+      <!-- MISSION DOSSIER MODAL (A4 PRINTABLE TACTICAL FORENSIC REPORT)   -->
       <!-- ═══════════════════════════════════════════════════════════════ -->
-      <section class="view" id="view-telemetry">
-        <div class="view-header">
-          <div>
-            <h2 class="view-title">UGV Ground Control Station (GCS) Telemetry</h2>
-            <p class="view-desc">
-              Hardware-in-the-loop actuation interface: Differential steering, azimuth compass, and serial packet stream.
-            </p>
-          </div>
-        </div>
-
-        <div class="grid-3-col">
-          <!-- Compass Azimuth Bearing -->
-          <div class="panel-card">
-            <div class="card-header">
-              <div class="card-title">TARGET AZIMUTH BEARING COMPASS</div>
-              <div class="card-meta">Optical Field of View: 60°</div>
-            </div>
-            <div class="card-body compass-center">
-              <div class="compass-wrap">
-                <canvas id="compassCanvas" width="220" height="220"></canvas>
-              </div>
-              <div class="bearing-readout">
-                <div class="bearing-deg" id="telemetryBearing">+0.0°</div>
-                <div class="bearing-cmd" id="telemetryCmd">PATROL SCAN (SECTOR CLEAR)</div>
-              </div>
+      <div class="modal-backdrop" id="dossierModal" style="display: none;">
+        <div class="dossier-window">
+          <div class="dossier-actions-bar">
+            <span class="dossier-title-bar">TACTICAL RECONNAISSANCE DOSSIER // CLASSIFIED EXPORT</span>
+            <div class="dossier-btn-group">
+              <button class="btn btn-sm btn-primary" id="btnPrintDossier" type="button">Print / Save PDF</button>
+              <button class="btn btn-sm btn-secondary" id="btnCloseDossier" type="button">Close</button>
             </div>
           </div>
 
-          <!-- Dual Motor Actuation -->
-          <div class="panel-card">
-            <div class="card-header">
-              <div class="card-title">L298N DUAL H-BRIDGE MOTOR DRIVE</div>
-              <div class="card-meta">PWM Range: 0 - 255</div>
-            </div>
-            <div class="card-body">
-              <div class="motor-gauge-item">
-                <div class="motor-info">
-                  <span>Motor A (Port / Left Track)</span>
-                  <strong id="motorAPwm">0 / 255</strong>
-                </div>
-                <div class="bar-track">
-                  <div class="bar-fill emerald" id="motorABar" style="width: 0%"></div>
-                </div>
-              </div>
-
-              <div class="motor-gauge-item" style="margin-top: 20px;">
-                <div class="motor-info">
-                  <span>Motor B (Starboard / Right Track)</span>
-                  <strong id="motorBPwm">0 / 255</strong>
-                </div>
-                <div class="bar-track">
-                  <div class="bar-fill cyan" id="motorBBar" style="width: 0%"></div>
-                </div>
-              </div>
-
-              <div class="actuator-specs-box">
-                <div class="spec-row"><span>Driver:</span> <strong>L298N Dual Full-Bridge</strong></div>
-                <div class="spec-row"><span>Control Scheme:</span> <strong>Differential Proportional (Kp=1.2)</strong></div>
-                <div class="spec-row"><span>Power Rail:</span> <strong>12V Regulated DC</strong></div>
+          <div class="dossier-sheet" id="dossierSheet">
+            <div class="dossier-header">
+              <div class="dossier-stamp">TOP SECRET // DEFENSE AI VALIDATION</div>
+              <div class="dossier-agency">PROJECT NEUROCAMO — ADVANCED NEUROMORPHIC GCS</div>
+              <div class="dossier-subhead">Tactical Camouflage Saliency &amp; Edge Energy Telemetry Report</div>
+              <div class="dossier-meta-grid">
+                <div><strong>DATE / UTC:</strong> <span id="dosTimestamp">2026-10-29 20:00:00 UTC</span></div>
+                <div><strong>MISSION CODE:</strong> <span id="dosMissionCode">NC-RECON-774</span></div>
+                <div><strong>EDGE HARDWARE:</strong> NVIDIA Jetson Nano / TensorRT 8.2</div>
+                <div><strong>SNN CHECKPOINT:</strong> best_model_v4.pth (Dense Spatial Mask)</div>
               </div>
             </div>
-          </div>
 
-          <!-- Serial Packet Stream -->
-          <div class="panel-card">
-            <div class="card-header">
-              <div class="card-title">JETSON NANO SERIAL PROTOCOL ($UGV)</div>
-              <div class="card-meta">115200 Baud UART</div>
-            </div>
-            <div class="card-body">
-              <div class="serial-console" id="serialConsole">
-                <div class="console-line text-cyan">[INIT] UGV Telemetry Stream Active (115200 Baud)</div>
-                <div class="console-line text-muted">[INFO] Optical Tracker Linked to Neuromorphic Core</div>
+            <div class="dossier-section-title">1. TACTICAL OPTICAL &amp; BENCHMARK EVIDENCE</div>
+            <div class="dossier-evidence-grid">
+              <div class="dossier-img-box">
+                <div class="img-caption">A. RAW OPTICAL FEED</div>
+                <img id="dosRawImg" class="dos-preview-img" alt="Raw Input" />
               </div>
-              <div class="console-controls">
-                <button class="btn btn-sm" id="btnToggleSerial">Pause Feed</button>
-                <button class="btn btn-sm" id="btnClearSerial">Clear Console</button>
+              <div class="dossier-img-box">
+                <div class="img-caption">B. NEUROCAMO SNN (PROPOSED)</div>
+                <img id="dosSnnImg" class="dos-preview-img" alt="SNN Detection" />
+              </div>
+              <div class="dossier-img-box">
+                <div class="img-caption">C. YOLOV8-NANO (BASELINE CNN)</div>
+                <img id="dosYoloImg" class="dos-preview-img" alt="YOLOv8 Detection" />
               </div>
             </div>
-          </div>
-        </div>
 
-        <!-- Robot Car Chassis CAD Specs -->
-        <div class="panel-card" style="margin-top: 20px;">
-          <div class="card-header">
-            <div class="card-title">PHYSICAL ROBOT CHASSIS & EMBEDDED SYSTEM SPECIFICATIONS</div>
-            <div class="card-meta">Parametric CAD Model: cad_robot_car.py</div>
-          </div>
-          <div class="card-body">
-            <div class="chassis-grid">
-              <div class="spec-tile">
-                <div class="tile-val">4WD Tracked</div>
-                <div class="tile-lbl">Chassis Architecture</div>
-                <div class="tile-desc">All-terrain aluminum dual-tread platform</div>
+            <div class="dossier-section-title">2. EMPIRICAL NEUROMORPHIC vs CONVENTIONAL CNN TELEMETRY</div>
+            <table class="dossier-table">
+              <thead>
+                <tr>
+                  <th>EVALUATION METRIC</th>
+                  <th>NEUROCAMO SNN (PROPOSED)</th>
+                  <th>ULTRALYTICS YOLOV8-NANO</th>
+                  <th>EDGE ADVANTAGE</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Target Detection &amp; Localization</td>
+                  <td id="dosSnnVerdict" class="text-emerald">CAMOUFLAGE LOCK</td>
+                  <td id="dosYoloVerdict" class="text-crimson">0 OBJECTS DETECTED</td>
+                  <td>SNN Penetrates Disruptive Camouflage</td>
+                </tr>
+                <tr>
+                  <td>Model Confidence</td>
+                  <td id="dosSnnConf">78.3%</td>
+                  <td id="dosYoloConf">0.0%</td>
+                  <td id="dosConfAdv">+78.3% Confidence Differential</td>
+                </tr>
+                <tr>
+                  <td>Edge Power Consumption</td>
+                  <td id="dosSnnPower">0.91 W</td>
+                  <td id="dosYoloPower">8.70 W</td>
+                  <td id="dosPowerAdv">9.5× Lower Power Draw</td>
+                </tr>
+                <tr>
+                  <td>Inference Energy per Frame</td>
+                  <td id="dosSnnEnergy">0.18 mJ</td>
+                  <td id="dosYoloEnergy">40.02 mJ</td>
+                  <td id="dosEnergyAdv">220× Synaptic Energy Efficiency</td>
+                </tr>
+                <tr>
+                  <td>Inference Latency on Edge</td>
+                  <td id="dosSnnLat">16.1 ms (~62 FPS)</td>
+                  <td id="dosYoloLat">42.7 ms (~23 FPS)</td>
+                  <td id="dosLatAdv">2.6× Faster Edge Throughput</td>
+                </tr>
+                <tr>
+                  <td>Neural Sparsity (Silent Synapses)</td>
+                  <td id="dosSnnSparsity">78.4% Silent</td>
+                  <td>0.0% (Dense 8.7 GFLOPs)</td>
+                  <td>Event-Driven Dynamic Zero-MAC</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div class="dossier-section-title">3. REVIEW COMMITTEE VERIFICATION &amp; DEFENSE SIGN-OFF</div>
+            <div class="dossier-signatures">
+              <div class="sig-block">
+                <div class="sig-line"></div>
+                <div class="sig-role">Project Guide / Internal Reviewer</div>
+                <div class="sig-desc">Department of Computer Science &amp; Engineering</div>
               </div>
-              <div class="spec-tile">
-                <div class="tile-val">180×160×75 mm</div>
-                <div class="tile-lbl">Physical Envelope</div>
-                <div class="tile-desc">Total dry weight: 850g (incl. battery)</div>
+              <div class="sig-block">
+                <div class="sig-line"></div>
+                <div class="sig-role">External Subject Matter Expert</div>
+                <div class="sig-desc">Neuromorphic Systems &amp; Defense AI Committee</div>
               </div>
-              <div class="spec-tile">
-                <div class="tile-val">NVIDIA Jetson Nano</div>
-                <div class="tile-lbl">Edge Neuromorphic Host</div>
-                <div class="tile-desc">128 Maxwell CUDA Cores + ARM A57</div>
-              </div>
-              <div class="spec-tile">
-                <div class="tile-val">Sony IMX219 CSI</div>
-                <div class="tile-lbl">Optical Sensor</div>
-                <div class="tile-desc">160° FOV Wide-Angle Fixed Focal Camera</div>
+              <div class="sig-block">
+                <div class="sig-line"></div>
+                <div class="sig-role">Head of Department (HOD)</div>
+                <div class="sig-desc">Evaluation &amp; Project Sign-off Authority</div>
               </div>
             </div>
           </div>
         </div>
-      </section>
-
-      <!-- ═══════════════════════════════════════════════════════════════ -->
-      <!-- VIEW 5: MODEL ARCHITECTURE & SPECS                              -->
-      <!-- ═══════════════════════════════════════════════════════════════ -->
-      <section class="view" id="view-arch">
-        <div class="view-header">
-          <div>
-            <h2 class="view-title">SNN Architecture & Edge Deployment Specifications</h2>
-            <p class="view-desc">
-              Comprehensive topological breakdown of the 3-Layer Spiking Convolutional Network and ONNX Edge Export.
-            </p>
-          </div>
-        </div>
-
-        <div class="grid-2-col">
-          <!-- Architecture Pipeline -->
-          <div class="panel-card">
-            <div class="card-header">
-              <div class="card-title">NEUROMORPHIC COMPUTATIONAL PIPELINE</div>
-              <div class="card-meta">snnTorch 1.0.0 & PyTorch 2.5</div>
-            </div>
-            <div class="card-body">
-              <div class="pipeline-list">
-                <div class="pipe-step">
-                  <div class="pipe-badge">Stage 0</div>
-                  <div class="pipe-body">
-                    <strong>Input Frame Normalization</strong>
-                    <div>128 × 128 × 3 RGB Tensor, normalized [0, 1]</div>
-                  </div>
-                </div>
-                <div class="pipe-step">
-                  <div class="pipe-badge">Stage 1</div>
-                  <div class="pipe-body">
-                    <strong>Poisson Rate Spike Encoder</strong>
-                    <div>Temporal conversion to Bernoulli spike trains over T=16 timesteps</div>
-                  </div>
-                </div>
-                <div class="pipe-step">
-                  <div class="pipe-badge">Stage 2</div>
-                  <div class="pipe-body">
-                    <strong>ConvSpike Layer 1</strong>
-                    <div>32 filters, 3×3 kernel, LIF neuron (β=0.9, V<sub>th</sub>=1.0)</div>
-                  </div>
-                </div>
-                <div class="pipe-step">
-                  <div class="pipe-badge">Stage 3</div>
-                  <div class="pipe-body">
-                    <strong>ConvSpike Layer 2</strong>
-                    <div>64 filters, 3×3 kernel, LIF neuron (β=0.9, V<sub>th</sub>=1.0)</div>
-                  </div>
-                </div>
-                <div class="pipe-step">
-                  <div class="pipe-badge">Stage 4</div>
-                  <div class="pipe-body">
-                    <strong>ConvSpike Layer 3</strong>
-                    <div>128 filters, 3×3 kernel, LIF neuron (β=0.9, V<sub>th</sub>=1.0)</div>
-                  </div>
-                </div>
-                <div class="pipe-step">
-                  <div class="pipe-badge">Stage 5</div>
-                  <div class="pipe-body">
-                    <strong>ASAB (Attentive Saliency Auxiliary Bridge)</strong>
-                    <div>Dual temporal spike & membrane integration</div>
-                  </div>
-                </div>
-                <div class="pipe-step">
-                  <div class="pipe-badge">Stage 6</div>
-                  <div class="pipe-body">
-                    <strong>Dense Spatial Mask Head</strong>
-                    <div>16×16 feature grid decoded to 128×128 pixel-wise target objectness</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Weights, Checkpoints & ONNX Specs -->
-          <div class="panel-card">
-            <div class="card-header">
-              <div class="card-title">DEPLOYED CHECKPOINT & EDGE METRICS</div>
-              <div class="card-meta">Validated Checkpoint: best_model_v4.pth</div>
-            </div>
-            <div class="card-body">
-              <table class="specs-table">
-                <tbody>
-                  <tr>
-                    <td>Active Checkpoint File</td>
-                    <td class="text-cyan">best_model_v4.pth</td>
-                  </tr>
-                  <tr>
-                    <td>Model Architecture Head</td>
-                    <td>Dense Spatial Mask (No Collapse)</td>
-                  </tr>
-                  <tr>
-                    <td>Trained Epochs</td>
-                    <td>4 (Loss: 0.9389)</td>
-                  </tr>
-                  <tr>
-                    <td>Total Parameter Count</td>
-                    <td>820,417 weights (~3.3 MB)</td>
-                  </tr>
-                  <tr>
-                    <td>Temporal Timesteps (T)</td>
-                    <td>16 Poisson steps</td>
-                  </tr>
-                  <tr>
-                    <td>Neuron Decay Rate (β)</td>
-                    <td>0.90 (Leaky Integrate-and-Fire)</td>
-                  </tr>
-                  <tr>
-                    <td>Surrogate Gradient</td>
-                    <td>Fast Sigmoid (ATan slope α=2.0)</td>
-                  </tr>
-                  <tr>
-                    <td>Exported Edge Model</td>
-                    <td class="text-emerald">neurocamo_edge.onnx (3.1 MB, 932 nodes)</td>
-                  </tr>
-                  <tr>
-                    <td>Edge Target Platform</td>
-                    <td>NVIDIA Jetson Nano / TensorRT 8.2</td>
-                  </tr>
-                </tbody>
-              </table>
-
-              <div class="onnx-status-banner">
-                <div class="onnx-badge">ONNX EDGE VALIDATED</div>
-                <div>Model is fully exported to ONNX format with 932 operators and zero dynamic shapes, ready for Jetson TensorRT engine compilation.</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
+      </div>
     </main>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=14.1"></script>
   </body>
 </html>

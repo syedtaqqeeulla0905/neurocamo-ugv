@@ -21,6 +21,9 @@ PYTHON_EXE = os.path.join(HERE, "neurocamo", "venv", "Scripts", "python.exe")
 APP_PY = os.path.join(HERE, "neurocamo-web", "app.py")
 
 
+PROFILE_DIR = os.path.join(HERE, ".gcs_profile")
+
+
 def is_server_running():
     try:
         with urllib.request.urlopen(f"{URL}/api/status", timeout=1.0) as resp:
@@ -38,10 +41,6 @@ def start_server():
     proc = subprocess.Popen(
         [PYTHON_EXE, APP_PY],
         cwd=os.path.join(HERE, "neurocamo-web"),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
     )
 
     # Wait for server to come up
@@ -57,33 +56,31 @@ def start_server():
 
 def launch_desktop_window():
     print(f"  [2/2] Opening NeuroCamo GCS Desktop Application Window...")
+    edge_profile = os.path.join(HERE, ".gcs_edge_profile")
+    os.makedirs(edge_profile, exist_ok=True)
 
-    # Edge App Mode Path
-    edge_paths = [
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-    ]
-    chrome_paths = [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    ]
+    # Use Microsoft Edge exclusively so personal Chrome sessions (and tabs like Facebook) are never touched
+    edge_exe = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
-    for p in edge_paths + chrome_paths:
-        if os.path.exists(p):
-            subprocess.Popen(
-                [
-                    p,
-                    f"--app={URL}",
-                    "--window-size=1520,960",
-                    "--window-position=50,50",
-                    "--disable-extensions",
-                    "--disable-plugins",
-                ]
-            )
-            print(f"  [OK] Launched native application shell using: {os.path.basename(p)}")
-            return
+    if os.path.exists(edge_exe):
+        subprocess.Popen(
+            [
+                edge_exe,
+                f"--app={URL}",
+                f"--user-data-dir={edge_profile}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-http-cache",
+                "--window-size=1520,960",
+                "--window-position=50,50",
+                "--disable-extensions",
+                "--disable-plugins",
+            ]
+        )
+        print("  [OK] Launched isolated Edge application window.")
+        return
 
-    # Fallback to default web browser
+    # Fallback to default web browser only if Edge is missing
     webbrowser.open(URL)
     print("  [OK] Opened in default web browser.")
 
