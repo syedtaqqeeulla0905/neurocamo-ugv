@@ -242,7 +242,7 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
     LAST_BGR = bgr.copy()
 
     # Encode input image as base64 JPEG
-    jpeg_qual = 65 if is_live else 85
+    jpeg_qual = 55 if is_live else 85
     ok_in, buf_in = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
     input_b64 = "data:image/jpeg;base64," + base64.b64encode(buf_in).decode("ascii") if ok_in else ""
 
@@ -258,32 +258,37 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
     out["filename"] = filename
     out["env_filter"] = env_filter
 
-    # Generate Tactical Saliency Heatmap (JET Colormap) and Camo Mask Overlays
-    try:
-        h_orig, w_orig = bgr.shape[:2]
-        if out.get("heatmap") and out["heatmap"].get("data"):
-            h_raw = np.array(out["heatmap"]["data"], dtype=np.uint8).reshape((16, 16))
-            h_full = cv2.resize(h_raw, (w_orig, h_orig), interpolation=cv2.INTER_CUBIC)
-            
-            # Saliency False-Color Heatmap (JET)
-            heat_color = cv2.applyColorMap(h_full, cv2.COLORMAP_JET)
-            saliency_bgr = cv2.addWeighted(bgr, 0.42, heat_color, 0.58, 0)
-            ok_sal, buf_sal = cv2.imencode(".jpg", saliency_bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
-            out["saliency_png"] = "data:image/jpeg;base64," + base64.b64encode(buf_sal).decode("ascii") if ok_sal else out["result_png"]
-
-            # Camo Mask (Binary thresholded attention mask)
-            _, mask_bin = cv2.threshold(h_full, 80, 255, cv2.THRESH_BINARY)
-            camo_mask_bgr = bgr.copy()
-            camo_mask_bgr[mask_bin > 0] = cv2.addWeighted(camo_mask_bgr[mask_bin > 0], 0.3, np.full_like(camo_mask_bgr[mask_bin > 0], (0, 230, 160)), 0.7, 0)
-            ok_msk, buf_msk = cv2.imencode(".jpg", camo_mask_bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
-            out["camo_mask_png"] = "data:image/jpeg;base64," + base64.b64encode(buf_msk).decode("ascii") if ok_msk else out["result_png"]
-        else:
-            out["saliency_png"] = out["result_png"]
-            out["camo_mask_png"] = out["result_png"]
-    except Exception as e_ov:
-        print(f"Overlay generation warning: {e_ov}")
+    # In live mode: skip 2 heavy extra JPEG compressions to give maximum FPS on Jetson Xavier NX
+    if is_live:
         out["saliency_png"] = out["result_png"]
         out["camo_mask_png"] = out["result_png"]
+    else:
+        # Generate Tactical Saliency Heatmap (JET Colormap) and Camo Mask Overlays
+        try:
+            h_orig, w_orig = bgr.shape[:2]
+            if out.get("heatmap") and out["heatmap"].get("data"):
+                h_raw = np.array(out["heatmap"]["data"], dtype=np.uint8).reshape((16, 16))
+                h_full = cv2.resize(h_raw, (w_orig, h_orig), interpolation=cv2.INTER_CUBIC)
+                
+                # Saliency False-Color Heatmap (JET)
+                heat_color = cv2.applyColorMap(h_full, cv2.COLORMAP_JET)
+                saliency_bgr = cv2.addWeighted(bgr, 0.42, heat_color, 0.58, 0)
+                ok_sal, buf_sal = cv2.imencode(".jpg", saliency_bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
+                out["saliency_png"] = "data:image/jpeg;base64," + base64.b64encode(buf_sal).decode("ascii") if ok_sal else out["result_png"]
+
+                # Camo Mask (Binary thresholded attention mask)
+                _, mask_bin = cv2.threshold(h_full, 80, 255, cv2.THRESH_BINARY)
+                camo_mask_bgr = bgr.copy()
+                camo_mask_bgr[mask_bin > 0] = cv2.addWeighted(camo_mask_bgr[mask_bin > 0], 0.3, np.full_like(camo_mask_bgr[mask_bin > 0], (0, 230, 160)), 0.7, 0)
+                ok_msk, buf_msk = cv2.imencode(".jpg", camo_mask_bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
+                out["camo_mask_png"] = "data:image/jpeg;base64," + base64.b64encode(buf_msk).decode("ascii") if ok_msk else out["result_png"]
+            else:
+                out["saliency_png"] = out["result_png"]
+                out["camo_mask_png"] = out["result_png"]
+        except Exception as e_ov:
+            print(f"Overlay generation warning: {e_ov}")
+            out["saliency_png"] = out["result_png"]
+            out["camo_mask_png"] = out["result_png"]
 
     # Temporal Poisson Spike Evolution across T=1..16 timesteps (bypassed in live mode for maximum FPS)
     if is_live:
@@ -824,16 +829,22 @@ def detect_realsense():
         is_live = bool(body.get("is_live", True))
         with _rs_lock:
             pipeline = _get_rs_pipeline()
-            frames = pipeline.wait_for_frames(timeout_ms=3000)
+            frames = pipeline.wait_for_frames(timeout_ms=1500)
+            # Drain internal buffer queue to always grab the absolute freshest live frame (zero backlog lag)
+            while True:
+                newer = pipeline.poll_for_frames()
+                if not newer:
+                    break
+                frames = newer
             color_frame = frames.get_color_frame()
             if not color_frame:
-                return jsonify({"error": "No color frame from RealSense"}), 500
+                return jsonify({"error": "No color frame received from RealSense camera"}), 400
             bgr = np.asanyarray(color_frame.get_data()).copy()
         out = _process_bgr(bgr, "RealSense D435i Live", yolo_conf=yolo_conf, env_filter=env_filter, is_live=is_live)
         return jsonify(sanitize_json(out))
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"RealSense: {str(e)}"}), 400
 
 
 def _rs_mjpeg_generator():

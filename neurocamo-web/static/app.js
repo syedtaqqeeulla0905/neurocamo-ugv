@@ -586,9 +586,10 @@ async function toggleRealSense() {
   }
 
   if (state.isRealSenseActive) {
-    if (state.rsInterval) clearInterval(state.rsInterval);
-    state.rsInterval = null;
+    if (state.rsTimeout) clearTimeout(state.rsTimeout);
+    state.rsTimeout = null;
     state.isRealSenseActive = false;
+    state.isProcessingCamFrame = false;
     if (btn) btn.classList.remove("streaming");
     if (btnTxt) btnTxt.textContent = "RealSense Live";
     return;
@@ -599,7 +600,11 @@ async function toggleRealSense() {
   if (btnTxt) btnTxt.textContent = "Stop RealSense";
 
   const pollRS = async () => {
-    if (!state.isRealSenseActive || state.isProcessingCamFrame) return;
+    if (!state.isRealSenseActive) return;
+    if (state.isProcessingCamFrame) {
+      if (state.isRealSenseActive) state.rsTimeout = setTimeout(pollRS, 25);
+      return;
+    }
     state.isProcessingCamFrame = true;
     try {
       const res = await fetch("/api/detect_realsense", {
@@ -615,19 +620,22 @@ async function toggleRealSense() {
       }
     } catch (err) {
       console.error("RealSense error:", err);
-      if (state.rsInterval) clearInterval(state.rsInterval);
-      state.rsInterval = null;
+      if (state.rsTimeout) clearTimeout(state.rsTimeout);
+      state.rsTimeout = null;
       state.isRealSenseActive = false;
       if (btn) btn.classList.remove("streaming");
       if (btnTxt) btnTxt.textContent = "RealSense Live";
-      alert("RealSense error: " + err.message);
+      alert("RealSense: " + err.message);
+      return;
     } finally {
       state.isProcessingCamFrame = false;
+      if (state.isRealSenseActive) {
+        state.rsTimeout = setTimeout(pollRS, 20);
+      }
     }
   };
 
   pollRS();
-  state.rsInterval = setInterval(pollRS, 90);
 }
 
 // ── Feature 2: Tactical False-Color Overlay Selector ─────────────────────────
@@ -998,8 +1006,13 @@ function applyInferenceResult(data) {
     state.yoloPowerHistory.push(parseFloat(annPwr.toFixed(2)));
     if (state.yoloPowerHistory.length > 25) state.yoloPowerHistory.shift();
 
-    drawPowerTraceChart(state.snnPowerHistory, state.yoloPowerHistory);
-    drawLatencyOscilloscope(state.latencyHistory, state.yoloLatencyHistory);
+    const isLiveActive = state.isWebcamActive || state.isRealSenseActive;
+
+    // Redraw dual time-series traces (always when in power view, throttled if live)
+    if (!isLiveActive || state.activeView === "view-power") {
+      drawPowerTraceChart(state.snnPowerHistory, state.yoloPowerHistory);
+      drawLatencyOscilloscope(state.latencyHistory, state.yoloLatencyHistory);
+    }
 
     // Update STANAG 4586 / MAVLink Tactical GCS Console
     const tel = data.telemetry || {};
@@ -1018,11 +1031,13 @@ function applyInferenceResult(data) {
       packetStatus.style.color = tel.detected ? "var(--color-emerald)" : "var(--text-muted)";
     }
 
-    // Update Neuromorphic Core tab
+    // Update Neuromorphic Core tab (only render heavy spectrogram canvas if tab is visible)
     if (data.spectrogram) {
-      renderSpectrogram(data.spectrogram);
-      if (data.spectrogram.per_step_rate) {
-        drawRateCurve(data.spectrogram.per_step_rate);
+      if (!isLiveActive || state.activeView === "view-spikes") {
+        renderSpectrogram(data.spectrogram);
+        if (data.spectrogram.per_step_rate) {
+          drawRateCurve(data.spectrogram.per_step_rate);
+        }
       }
       setTxt("activeChannelsVal", `${data.spectrogram.active_channels || 0} / 128`);
     }
@@ -1039,7 +1054,9 @@ function applyInferenceResult(data) {
 
     if (data.dynamic_energy) {
       state.currentEnergy = data.dynamic_energy;
-      drawDynamicEnergyChart(state.currentEnergy);
+      if (!isLiveActive || state.activeView === "view-power") {
+        drawDynamicEnergyChart(state.currentEnergy);
+      }
     }
   } catch (err) {
     console.error("Non-fatal error updating UI views:", err);
