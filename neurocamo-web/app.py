@@ -260,8 +260,10 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
 
     out = run_inference(BUNDLE, bgr, is_live=is_live)
 
-    annotated = out.pop("annotated_rgb")
-    ok_out, buf_out = cv2.imencode(".jpg", cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
+    annotated = out.pop("annotated_bgr", None)
+    if annotated is None:
+        annotated = cv2.cvtColor(out.pop("annotated_rgb"), cv2.COLOR_RGB2BGR)
+    ok_out, buf_out = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
     if not ok_out:
         raise RuntimeError("Could not encode result image")
 
