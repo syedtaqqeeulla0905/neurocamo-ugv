@@ -90,6 +90,36 @@ try:
 except Exception:
     pass
 
+def _ensure_cuda_nms_compat() -> None:
+    """If torchvision was built without CUDA NMS (common on Jetson pip wheels),
+    transparently run only the tiny final NMS step on CPU while keeping YOLOv8
+    backbone/neck/head inference 100% on CUDA GPU."""
+    if not torch.cuda.is_available():
+        return
+    try:
+        import torchvision
+        _b = torch.tensor([[0.0, 0.0, 10.0, 10.0]], device="cuda")
+        _s = torch.tensor([0.9], device="cuda")
+        torchvision.ops.nms(_b, _s, 0.5)
+    except Exception:
+        try:
+            import torchvision.ops as _tv_ops
+            _orig_nms = _tv_ops.nms
+
+            def _cpu_safe_nms(boxes, scores, iou_threshold):
+                if boxes.is_cuda:
+                    keep = _orig_nms(boxes.detach().cpu(), scores.detach().cpu(), iou_threshold)
+                    return keep.to(boxes.device)
+                return _orig_nms(boxes, scores, iou_threshold)
+
+            _tv_ops.nms = _cpu_safe_nms
+            print("  [INFO] Patched torchvision.ops.nms for Jetson CUDA compatibility")
+        except Exception:
+            pass
+
+
+_ensure_cuda_nms_compat()
+
 YOLO_PATH = os.path.join(NEUROCAMO_ROOT, "checkpoints", "yolov8n.pt")
 if not os.path.exists(YOLO_PATH):
     YOLO_PATH = os.path.join(PROJECT_ROOT, "yolov8n.pt")
