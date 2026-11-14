@@ -8,7 +8,7 @@
       name="description"
       content="Tactical Ground Control Station & Spiking Neural Network Analytics Suite for Edge Camouflage Reconnaissance."
     />
-    <link rel="stylesheet" href="styles.css?v=14.2" />
+    <link rel="stylesheet" href="styles.css?v=14.3" />
   </head>
   <body>
     <!-- Top Application Bar -->
@@ -49,6 +49,10 @@
         <div class="status-indicator live" id="sysStatus">
           <span class="pulse-dot"></span>
           <span id="sysStatusText">JETSON EDGE READY</span>
+        </div>
+        <div class="status-indicator power-pill" id="sysPowerStatus" title="Dynamic SNN Inference Power">
+          <span class="pill-dot emerald"></span>
+          <span>⚡ SNN: <strong id="globalSnnPower" class="text-emerald">0.58 W</strong></span>
         </div>
         <button class="btn btn-secondary btn-cam-toggle" id="btnLiveCam" type="button" title="Toggle Live Laptop/Drone Webcam Stream">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -141,6 +145,7 @@
             <div class="card-header">
               <div class="card-title">
                 <span class="dot-indicator tactical"></span> SNN TACTICAL DETECTION &amp; LOCALIZATION
+                <span class="hud-pill pill-pwr" id="snnCardPowerPill" title="Dynamic SNN Inference Power"><span class="pill-dot emerald"></span> <span id="snnCardPower">0.58 W</span></span>
               </div>
               <!-- Tactical False-Color Overlay Selector -->
               <div class="overlay-modes" id="reconOverlayModes">
@@ -187,6 +192,12 @@
             <div class="box-label">EDGE INFERENCE LATENCY</div>
             <div class="box-value" id="reconLatency">0.0 ms</div>
             <div class="box-sub" id="reconFps">Edge Target: ~60 FPS</div>
+          </div>
+
+          <div class="telemetry-box" id="reconPowerBox">
+            <div class="box-label">DYNAMIC SNN POWER DRAW</div>
+            <div class="box-value text-emerald" id="reconPower">0.58 W</div>
+            <div class="box-sub" id="reconEnergy">Energy: 8.14 mJ (5.0x vs ANN)</div>
           </div>
 
           <div class="telemetry-box action-box">
@@ -808,6 +819,6 @@
       </div>
     </main>
 
-    <script src="app.js?v=14.2"></script>
+    <script src="app.js?v=14.3"></script>
   </body>
 </html>

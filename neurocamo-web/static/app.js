@@ -476,6 +476,10 @@ function setupEventListeners() {
 }
 
 function setProcessingState(busy) {
+  const reconPwr = getEl("reconPower");
+  const globalPwr = getEl("globalSnnPower");
+  const cardPwr = getEl("snnCardPower");
+
   if (busy) {
     setTxt("cmpSnnBadge", "PROCESSING SNN SPIKES...");
     setStyle("cmpSnnBadge", "color", "var(--color-cyan)");
@@ -483,6 +487,14 @@ function setProcessingState(busy) {
     setTxt("cmpYoloBadge", "PROCESSING YOLOV8...");
     setStyle("cmpYoloBadge", "color", "var(--color-amber)");
     setStyle("cmpYoloBadge", "borderColor", "var(--color-amber)");
+
+    if (reconPwr) reconPwr.classList.add("pulsing-pwr");
+    if (globalPwr) globalPwr.classList.add("pulsing-pwr");
+    if (cardPwr) cardPwr.classList.add("pulsing-pwr");
+  } else {
+    if (reconPwr) reconPwr.classList.remove("pulsing-pwr");
+    if (globalPwr) globalPwr.classList.remove("pulsing-pwr");
+    if (cardPwr) cardPwr.classList.remove("pulsing-pwr");
   }
 }
 
@@ -933,6 +945,25 @@ function applyInferenceResult(data) {
     setTxt("reconLatency", `${lat} ms`);
     setTxt("reconFps", `Edge Throughput: ~${fpsEq} FPS`);
 
+    // Dynamic SNN Power & Energy (Updated on every inference run)
+    const snnPwr = data.dynamic_energy?.power_snn_w ?? data.telemetry?.power_snn_w ?? 0.58;
+    const snnEnergy = data.dynamic_energy?.snn_energy_mj ?? 8.144;
+    const snnStepEnergy = data.dynamic_energy?.snn_step_energy_mj ?? (snnEnergy / 16.0);
+    const sparsityPct = ((data.sparsity || 0.784) * 100).toFixed(1);
+    const yolo = data.yolo_benchmark || {};
+    const annPwr = yolo.power_w ?? data.telemetry?.power_ann_w ?? 8.45;
+    const yoloEnergy = yolo.energy_mj ?? 40.02;
+    const yoloOps = yolo.gflops ? `${yolo.gflops.toFixed(2)} GFLOPs (Dense)` : "8.70 GFLOPs (Dense)";
+    const yoloLat = yolo.latency_ms !== undefined ? yolo.latency_ms.toFixed(1) : "45.7";
+    const savRatio = (yoloEnergy / Math.max(0.01, snnEnergy)).toFixed(1);
+    const reductionText = data.dynamic_energy?.energy_reduction_factor ?? `${savRatio}x`;
+
+    // Update Live Reconnaissance View Power Metrics & HUD
+    setTxt("reconPower", `${snnPwr.toFixed(2)} W`);
+    setTxt("reconEnergy", `Energy: ${snnEnergy.toFixed(2)} mJ (${reductionText} vs ANN)`);
+    setTxt("snnCardPower", `${snnPwr.toFixed(2)} W`);
+    setTxt("globalSnnPower", `${snnPwr.toFixed(2)} W`);
+
     // ══════════════════════════════════════════════════════════
     // B. HEAD-TO-HEAD BENCHMARK VIEW (SNN vs YOLOV8-NANO)
     // ══════════════════════════════════════════════════════════
@@ -950,7 +981,6 @@ function applyInferenceResult(data) {
 
     const cmpYoloImg = getEl("cmpYoloImg");
     const cmpYoloPh = getEl("cmpYoloPlaceholder");
-    const yolo = data.yolo_benchmark || {};
     if (cmpYoloImg && yolo.result_png) {
       cmpYoloImg.src = yolo.result_png;
       cmpYoloImg.style.display = "block";
@@ -974,22 +1004,10 @@ function applyInferenceResult(data) {
     updateYoloDisplay(yolo);
 
     // 4. Dynamic Live Hardware Metrics (100% Calculated & Non-Static)
-    const snnPwr = data.dynamic_energy?.power_snn_w ?? data.telemetry?.power_snn_w ?? 0.58;
-    const annPwr = yolo.power_w ?? data.telemetry?.power_ann_w ?? 8.45;
-    const yoloLat = yolo.latency_ms !== undefined ? yolo.latency_ms.toFixed(1) : "45.7";
-    const snnLat = lat;
-    const sparsityPct = ((data.sparsity || 0.784) * 100).toFixed(1);
-
-    // Frame-specific Horowitz 45nm energy
-    const snnEnergy = data.dynamic_energy?.snn_energy_mj ?? 8.144;
-    const snnStepEnergy = data.dynamic_energy?.snn_step_energy_mj ?? (snnEnergy / 16.0);
-    const yoloEnergy = yolo.energy_mj ?? 40.02;
-    const yoloOps = yolo.gflops ? `${yolo.gflops.toFixed(2)} GFLOPs (Dense)` : "8.70 GFLOPs (Dense)";
-
     setTxt("cmpSnnPower", `${snnPwr.toFixed(2)} W`);
     setTxt("cmpSnnEnergy", `${snnEnergy.toFixed(2)} mJ (${snnStepEnergy.toFixed(3)} mJ/step)`);
     setTxt("cmpSnnSparsity", `${sparsityPct}% Silent`);
-    setTxt("cmpSnnLatency", `${snnLat} ms`);
+    setTxt("cmpSnnLatency", `${lat} ms`);
 
     setTxt("cmpYoloPower", `${annPwr.toFixed(2)} W`);
     setTxt("cmpYoloEnergy", `${yoloEnergy.toFixed(2)} mJ`);
@@ -1076,7 +1094,6 @@ function applyInferenceResult(data) {
     setTxt("pwrAnn", `${annPwr.toFixed(2)} W`);
     setTxt("frameEnergyVal", `${snnEnergy.toFixed(2)} mJ`);
     setTxt("annEnergyVal", `${yoloEnergy.toFixed(2)} mJ`);
-    const savRatio = (yoloEnergy / Math.max(0.01, snnEnergy)).toFixed(1);
     setTxt("savingsFactorVal", `${savRatio}x`);
 
     if (data.dynamic_energy) {
