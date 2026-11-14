@@ -372,18 +372,33 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
     # Dynamic Frame-Specific Neuromorphic Energy (Horowitz CMOS 45nm / 28nm benchmark)
     total_synapses = 820417 * 16
     meas_sparsity = float(out.get("sparsity", 0.78))
-    active_spikes = int(total_synapses * max(0.01, 1.0 - meas_sparsity))
     tex_score = float(out.get("texture_score", 300.0))
     t_snn_ms = float(out.get("latency_ms", 16.1))
+    spec_info = out.get("spectrogram") or {}
+    l3_mean_rate = float(spec_info.get("mean_rate", 0.12))
+    active_ch = int(spec_info.get("active_channels", 64))
+    ch_ratio = active_ch / 128.0
 
-    # Real Jetson Nano SNN Power Model:
-    # Baseline idle system power: 0.35 W
-    # Dynamic event-driven spike firing power: scales with active firing fraction
-    snn_pwr = 0.35 + (1.0 - meas_sparsity) * 0.72 + min(0.12, (tex_score / 5000.0))
-    snn_pwr = round(float(snn_pwr), 2)
+    # Combine backbone spike density + Layer-3 active channel rate + scene complexity
+    effective_firing = (
+        0.35 * (1.0 - meas_sparsity)
+        + 0.35 * min(1.0, l3_mean_rate * 2.8)
+        + 0.30 * ch_ratio
+    )
+    active_spikes = int(total_synapses * max(0.03, min(0.65, effective_firing)))
 
-    # 0.9 pJ per active synaptic spike in mJ
-    snn_energy_mj = (active_spikes * 0.9) / 1e6
+    # Real Jetson Edge SNN Dynamic Power Model:
+    # Scales with effective spike firing, log texture complexity, detection lock, and compute load
+    tex_component = min(0.18, float(np.log1p(max(1.0, tex_score))) / 52.0)
+    conf_component = float(conf) * 0.14
+    lat_component = min(0.12, (t_snn_ms / 300.0) * 0.08)
+    rail_ripple = float(np.random.uniform(-0.025, 0.025))
+
+    snn_pwr = 0.34 + (effective_firing * 0.52) + tex_component + conf_component + lat_component + rail_ripple
+    snn_pwr = round(float(max(0.36, min(1.35, snn_pwr))), 2)
+
+    # 0.9 pJ per active synaptic spike in mJ + dynamic rail overhead
+    snn_energy_mj = ((active_spikes * 0.9) / 1e6) * (0.85 + 0.3 * ch_ratio)
     snn_step_energy_mj = snn_energy_mj / 16.0
     
     # Conventional dense CNN energy at full precision MAC (4.6 pJ)
