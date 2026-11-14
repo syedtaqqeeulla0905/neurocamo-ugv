@@ -8,7 +8,7 @@
       name="description"
       content="Tactical Ground Control Station & Spiking Neural Network Analytics Suite for Edge Camouflage Reconnaissance."
     />
-    <link rel="stylesheet" href="styles.css?v=14.3" />
+    <link rel="stylesheet" href="styles.css?v=14.4" />
   </head>
   <body>
     <!-- Top Application Bar -->
@@ -21,16 +21,16 @@
         </div>
         <div class="brand-text">
           <div class="brand-title">NEURO<span>CAMO</span> <span class="badge-gcs">GCS v4.0</span></div>
-          <div class="brand-sub">TACTICAL SNN CAMOUFLAGE RECONNAISSANCE SUITE</div>
+          <div class="brand-sub">TACTICAL SNN RECON SUITE</div>
         </div>
       </div>
 
       <!-- View Mode Dropdown Selector -->
       <div class="mode-selector-wrap">
-        <label for="modeSelect" class="mode-selector-label">VIEW MODE:</label>
+        <label for="modeSelect" class="mode-selector-label">MODE:</label>
         <select id="modeSelect" class="mode-dropdown">
-          <option value="view-recon" selected>General Reconnaissance (Raw vs SNN Mask)</option>
-          <option value="view-compare">Live SNN vs YOLOv8-Nano Benchmark</option>
+          <option value="view-recon" selected>Reconnaissance (Raw vs SNN)</option>
+          <option value="view-compare">SNN vs YOLOv8 Benchmark</option>
         </select>
       </div>
 
@@ -40,19 +40,17 @@
           <span class="tab-label">SNN Neuromorphic Core</span>
         </button>
         <button class="nav-tab" data-view="view-power">
-          <span class="tab-label">Power &amp; Efficiency Analytics</span>
+          <span class="tab-label">Power &amp; Efficiency</span>
         </button>
       </nav>
 
       <!-- System Status & Action -->
       <div class="header-actions">
-        <div class="status-indicator live" id="sysStatus">
+        <div class="status-indicator live" id="sysStatus" title="Edge Status &amp; Dynamic SNN Power">
           <span class="pulse-dot"></span>
-          <span id="sysStatusText">JETSON EDGE READY</span>
-        </div>
-        <div class="status-indicator power-pill" id="sysPowerStatus" title="Dynamic SNN Inference Power">
-          <span class="pill-dot emerald"></span>
-          <span>⚡ SNN: <strong id="globalSnnPower" class="text-emerald">0.58 W</strong></span>
+          <span id="sysStatusText">EDGE READY</span>
+          <span style="opacity: 0.35; margin: 0 3px;">|</span>
+          <span id="sysPowerStatus">⚡ <strong id="globalSnnPower" class="text-emerald">0.58 W</strong></span>
         </div>
         <button class="btn btn-secondary btn-cam-toggle" id="btnLiveCam" type="button" title="Toggle Live Laptop/Drone Webcam Stream">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -76,7 +74,7 @@
             <line x1="16" y1="17" x2="8" y2="17" />
             <polyline points="10 9 9 9 8 9" />
           </svg>
-          Export Dossier
+          Dossier
         </button>
         <button class="btn btn-primary" id="btnUploadHeader" type="button">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -144,16 +142,16 @@
           <div class="feed-card">
             <div class="card-header">
               <div class="card-title">
-                <span class="dot-indicator tactical"></span> SNN TACTICAL DETECTION &amp; LOCALIZATION
+                <span class="dot-indicator tactical"></span> SNN TACTICAL DETECTION
                 <span class="hud-pill pill-pwr" id="snnCardPowerPill" title="Dynamic SNN Inference Power"><span class="pill-dot emerald"></span> <span id="snnCardPower">0.58 W</span></span>
               </div>
               <!-- Tactical False-Color Overlay Selector -->
               <div class="overlay-modes" id="reconOverlayModes">
-                <span class="card-meta" id="detMeta" style="margin-right: 6px;">best_model_v4</span>
+                <span class="card-meta" id="detMeta" style="display: none;">best_model_v4</span>
                 <span class="overlay-lbl">LAYER:</span>
                 <button class="overlay-btn active" data-overlay="box">Target Box</button>
-                <button class="overlay-btn" data-overlay="saliency">Saliency Heatmap (JET)</button>
-                <button class="overlay-btn" data-overlay="mask">Camo Penetration</button>
+                <button class="overlay-btn" data-overlay="saliency">Saliency (JET)</button>
+                <button class="overlay-btn" data-overlay="mask">Camo Mask</button>
               </div>
             </div>
             <div class="card-body frame-container">
@@ -819,6 +817,6 @@
       </div>
     </main>
 
-    <script src="app.js?v=14.3"></script>
+    <script src="app.js?v=14.4"></script>
   </body>
 </html>

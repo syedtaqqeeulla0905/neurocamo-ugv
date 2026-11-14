@@ -149,10 +149,10 @@ async function loadSystemStatus() {
     const res = await fetch("/api/status");
     const data = await res.json();
     if (data.ready) {
-      setTxt("sysStatusText", `JETSON ${data.device.toUpperCase()} // READY`);
+      setTxt("sysStatusText", "EDGE READY");
     }
   } catch (err) {
-    setTxt("sysStatusText", "STANDALONE MODE");
+    setTxt("sysStatusText", "STANDALONE");
   }
 }
 
