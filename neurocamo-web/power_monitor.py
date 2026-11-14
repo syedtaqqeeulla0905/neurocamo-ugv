@@ -145,8 +145,12 @@ class _SysfsInaReader:
         iio_dirs = sorted(
             set(
                 glob.glob("/sys/bus/i2c/drivers/ina3221x/*/iio:device*")
+                + glob.glob("/sys/bus/i2c/drivers/ina3221x/*/iio_device*")
                 + glob.glob("/sys/bus/i2c/drivers/ina3221*/*/iio:device*")
+                + glob.glob("/sys/bus/i2c/drivers/ina3221*/*/iio_device*")
                 + glob.glob("/sys/bus/i2c/devices/*/iio:device*")
+                + glob.glob("/sys/bus/i2c/devices/*/iio_device*")
+                + glob.glob("/sys/bus/iio/devices/iio:device*")
             )
         )
         for d in iio_dirs:
@@ -286,8 +290,8 @@ class _SysfsInaReader:
 class _TegrastatsReader:
     """Tier 2: Jetson `tegrastats --interval 150` subprocess reader (Linux only)."""
 
-    _RE_VDD_IN = re.compile(r"(?:VDD_IN|POM_5V_IN)\s+(\d+)(?:mW)?/")
-    _RE_RAIL_MW = re.compile(r"(VDD_GPU_SOC|VDD_CPU_CV|VIN_SYS_5V0|VDD_SYS_GPU|VDD_SYS_CPU|VDD_SYS_SOC)\s+(\d+)(?:mW)?/")
+    _RE_VDD_IN = re.compile(r"(?:VDD_IN|POM_5V_IN)\s+(\d+)\s*(?:mW)?")
+    _RE_RAIL_MW = re.compile(r"(VDD_GPU_SOC|VDD_CPU_CV|VIN_SYS_5V0|VDD_SYS_GPU|VDD_SYS_CPU|VDD_SYS_SOC)\s+(\d+)\s*(?:mW)?")
     _RE_GR3D = re.compile(r"GR3D_FREQ\s+(\d+)%")
     _RE_CPU = re.compile(r"CPU\s+\[([^\]]+)\]")
     _RE_RAM = re.compile(r"RAM\s+(\d+)/(\d+)MB")
@@ -296,6 +300,11 @@ class _TegrastatsReader:
         if not sys.platform.startswith("linux"):
             raise RuntimeError("tegrastats only available on Linux")
         exe = shutil.which("tegrastats")
+        if not exe:
+            for candidate in ("/usr/bin/tegrastats", "/usr/sbin/tegrastats", "/bin/tegrastats"):
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    exe = candidate
+                    break
         if not exe:
             raise RuntimeError("tegrastats binary not found")
 
@@ -501,8 +510,14 @@ class _PsutilEstimatorReader:
         self._lock = threading.Lock()
         self._proc = psutil.Process()
         self._n_cpus = max(1, int(psutil.cpu_count(logical=True) or 1))
-        self._idle_w = float(os.environ.get("NEUROCAMO_EST_IDLE_W", "2.5"))
-        self._tdp_w = float(os.environ.get("NEUROCAMO_EST_TDP_W", "15.0"))
+        model_txt = (_read_text("/proc/device-tree/model") or "").lower()
+        is_jetson_nano = ("jetson" in model_txt and "nano" in model_txt) or (
+            os.path.exists("/etc/nv_tegra_release") and self._n_cpus <= 4
+        )
+        default_idle = "1.2" if is_jetson_nano else "2.5"
+        default_tdp = "5.0" if is_jetson_nano else "15.0"
+        self._idle_w = float(os.environ.get("NEUROCAMO_EST_IDLE_W", default_idle))
+        self._tdp_w = float(os.environ.get("NEUROCAMO_EST_TDP_W", default_tdp))
         self._prev_times = self._proc.cpu_times()
         self._prev_t = time.perf_counter()
         psutil.cpu_percent(interval=None)
