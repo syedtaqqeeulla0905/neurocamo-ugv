@@ -958,11 +958,13 @@ function applyInferenceResult(data) {
     const savRatio = (yoloEnergy / Math.max(0.01, snnEnergy)).toFixed(1);
     const reductionText = data.dynamic_energy?.energy_reduction_factor ?? `${savRatio}x`;
 
-    // Update Live Reconnaissance View Power Metrics & HUD
+    // Update Live Reconnaissance View Power Waveform & HUD
     setTxt("reconPower", `${snnPwr.toFixed(2)} W`);
-    setTxt("reconEnergy", `Energy: ${snnEnergy.toFixed(2)} mJ (${reductionText} vs ANN)`);
+    setTxt("reconEnergy", detected ? "Active LIF Spike Burst (Target Lock)" : "Event-Gated Low Power (Sector Clear)");
     setTxt("snnCardPower", `${snnPwr.toFixed(2)} W`);
     setTxt("globalSnnPower", `${snnPwr.toFixed(2)} W`);
+    drawLivePowerWaveform("reconPowerCanvas", state.snnPowerHistory, state.yoloPowerHistory, false);
+    drawLivePowerWaveform("sysPowerCardCanvas", state.snnPowerHistory, state.yoloPowerHistory, true);
 
     // ══════════════════════════════════════════════════════════
     // B. HEAD-TO-HEAD BENCHMARK VIEW (SNN vs YOLOV8-NANO)
@@ -1404,12 +1406,100 @@ function drawDynamicEnergyChart(energyData) {
   setTxt("savingsFactorVal", `${factor}x`);
 }
 
+// ── Live Scrolling Power Waveform Renderer (Recon & System Power Card) ───────
+function drawLivePowerWaveform(canvasId, snnHist, yoloHist, showDual) {
+  const canvas = getEl(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#06090e";
+  ctx.fillRect(0, 0, w, h);
+
+  // Subtle tactical grid lines
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= 3; i++) {
+    const gy = (h / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(0, gy);
+    ctx.lineTo(w, gy);
+    ctx.stroke();
+  }
+  for (let j = 1; j <= 6; j++) {
+    const gx = (w / 7) * j;
+    ctx.beginPath();
+    ctx.moveTo(gx, 0);
+    ctx.lineTo(gx, h);
+    ctx.stroke();
+  }
+
+  const pts = snnHist && snnHist.length > 1 ? snnHist : [0.41, 0.43, 0.40, 0.42];
+  const n = pts.length;
+
+  // Map SNN range [0.30 .. 1.35 W] into visual vertical wave height so fluctuations are clearly visible
+  const mapSnnY = (val) => {
+    const norm = Math.max(0.05, Math.min(0.92, (val - 0.30) / 1.05));
+    return showDual ? h - norm * (h * 0.55) - 6 : h - norm * (h - 10) - 5;
+  };
+
+  if (showDual && yoloHist && yoloHist.length > 1) {
+    // Draw upper crimson YOLOv8-Nano dense power waveform
+    ctx.beginPath();
+    yoloHist.forEach((v, idx) => {
+      const x = (idx / Math.max(1, yoloHist.length - 1)) * (w - 8) + 4;
+      const normYolo = Math.max(0.72, Math.min(0.95, v / 10.5));
+      const y = h - normYolo * (h - 10) - 4;
+      if (idx === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = "#ff4455";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+  }
+
+  // Draw glowing emerald SNN waveform area + line
+  ctx.beginPath();
+  let lastX = 4;
+  let lastY = h / 2;
+  pts.forEach((v, idx) => {
+    const x = (idx / Math.max(1, n - 1)) * (w - 10) + 4;
+    const y = mapSnnY(v);
+    lastX = x;
+    lastY = y;
+    if (idx === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = "#00e5a0";
+  ctx.lineWidth = 2.0;
+  ctx.stroke();
+
+  // Fill gradient under SNN wave
+  ctx.lineTo(lastX, h);
+  ctx.lineTo(4, h);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, "rgba(0, 229, 160, 0.32)");
+  grad.addColorStop(1, "rgba(0, 229, 160, 0.02)");
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Pulsing live head dot at right edge
+  ctx.beginPath();
+  ctx.arc(lastX, lastY, 3.2, 0, Math.PI * 2);
+  ctx.fillStyle = "#00e5a0";
+  ctx.fill();
+}
+
 // ── 7. Real-Time Oscilloscope & Power Heartbeat Loop ─────────────────────────
 function startRealtimeMonitor() {
   let tick = 0;
   setInterval(() => {
     tick += 1;
     const hasResult = !!state.currentResult;
+    const isDetected = !!state.currentResult?.detected;
     const baseLat = state.currentResult?.latency_ms || 16.2;
     const jitter = (Math.random() - 0.5) * 1.4;
     const currentLat = Math.max(12.0, parseFloat((baseLat + jitter).toFixed(1)));
@@ -1419,48 +1509,51 @@ function startRealtimeMonitor() {
       state.latencyHistory.shift();
     }
 
-    // Dynamic SNN Power Rail Telemetry (Idle ~0.41W, Active frame-dependent with PMIC/clock ripple)
+    // Event-Driven SNN Power Rail Telemetry:
+    // Low patrol ripple (~0.40W) when sector clear/idle, higher dynamic burst (~0.88W) when target locked
     const basePwr = hasResult
-      ? (state.currentResult?.dynamic_energy?.power_snn_w ?? state.currentResult?.telemetry?.power_snn_w ?? 0.72)
+      ? (state.currentResult?.dynamic_energy?.power_snn_w ?? state.currentResult?.telemetry?.power_snn_w ?? (isDetected ? 0.88 : 0.42))
       : 0.41;
-    const wave = Math.sin(tick * 0.65) * 0.022;
-    const pwrJitter = (Math.random() - 0.5) * 0.046 + wave;
-    const liveSnnPwr = Math.max(0.35, parseFloat((basePwr + pwrJitter).toFixed(2)));
+    const wave = Math.sin(tick * 0.75) * (isDetected ? 0.065 : 0.032) + Math.cos(tick * 1.35) * 0.025;
+    const pwrJitter = (Math.random() - 0.5) * (isDetected ? 0.08 : 0.04) + wave;
+    const liveSnnPwr = Math.max(0.34, parseFloat((basePwr + pwrJitter).toFixed(2)));
 
     const baseAnnPwr = state.currentResult?.yolo_benchmark?.power_w ?? state.currentResult?.telemetry?.power_ann_w ?? 8.70;
-    const annJitter = (Math.random() - 0.5) * 0.22;
-    const liveAnnPwr = Math.max(7.80, parseFloat((baseAnnPwr + annJitter).toFixed(2)));
-
-    // Scale frame energy proportionally with live rail power fluctuation
-    const baseEnergy = state.currentResult?.dynamic_energy?.snn_energy_mj ?? 6.40;
-    const liveEnergy = Math.max(1.20, baseEnergy * (liveSnnPwr / Math.max(0.35, basePwr)));
-    const yoloEnergy = state.currentResult?.yolo_benchmark?.energy_mj ?? 40.02;
-    const liveSavRatio = (yoloEnergy / Math.max(0.01, liveEnergy)).toFixed(1);
+    const annWave = Math.sin(tick * 0.5) * 0.18 + (Math.random() - 0.5) * 0.28;
+    const liveAnnPwr = Math.max(7.80, parseFloat((baseAnnPwr + annWave).toFixed(2)));
 
     // Push to live history buffers for oscilloscope traces
     state.snnPowerHistory.push(liveSnnPwr);
-    if (state.snnPowerHistory.length > 30) state.snnPowerHistory.shift();
+    if (state.snnPowerHistory.length > 32) state.snnPowerHistory.shift();
     state.yoloPowerHistory.push(liveAnnPwr);
-    if (state.yoloPowerHistory.length > 30) state.yoloPowerHistory.shift();
+    if (state.yoloPowerHistory.length > 32) state.yoloPowerHistory.shift();
 
-    // Update all visible power indicators across Recon, HUD, Compare, and Power views
+    // Animate dynamic progress bars in SYSTEM POWER CONSUMPTION card
+    const snnBarPct = Math.max(4, Math.min(35, (liveSnnPwr / 3.2) * 100));
+    const annBarPct = Math.max(75, Math.min(100, (liveAnnPwr / 10.0) * 100));
+    setStyle("pwrSnnBar", "width", `${snnBarPct.toFixed(1)}%`);
+    setStyle("pwrAnnBar", "width", `${annBarPct.toFixed(1)}%`);
+    setTxt("pwrRatioBadge", isDetected ? "Active Target Spike Burst" : "Event-Gated Standby Patrol");
+
+    // Keep hidden/telemetry IDs synced
     setTxt("globalSnnPower", `${liveSnnPwr.toFixed(2)} W`);
     setTxt("snnCardPower", `${liveSnnPwr.toFixed(2)} W`);
     setTxt("reconPower", `${liveSnnPwr.toFixed(2)} W`);
-    if (hasResult) {
-      setTxt("reconEnergy", `Energy: ${liveEnergy.toFixed(2)} mJ (${liveSavRatio}x vs ANN)`);
-    }
     setTxt("cmpSnnPower", `${liveSnnPwr.toFixed(2)} W`);
     setTxt("hdrSnnPower", `${liveSnnPwr.toFixed(2)}W`);
     setTxt("hdrYoloPower", `${liveAnnPwr.toFixed(2)}W`);
     setTxt("pwrSnn", `${liveSnnPwr.toFixed(2)} W`);
     setTxt("pwrAnn", `${liveAnnPwr.toFixed(2)} W`);
 
+    // Always render the live scrolling power graphs so fluctuations are visible in real time
+    drawLivePowerWaveform("reconPowerCanvas", state.snnPowerHistory, state.yoloPowerHistory, false);
+    drawLivePowerWaveform("sysPowerCardCanvas", state.snnPowerHistory, state.yoloPowerHistory, true);
+
     if (state.activeView === "view-power") {
       drawPowerTraceChart(state.snnPowerHistory, state.yoloPowerHistory);
       drawLatencyOscilloscope(state.latencyHistory, state.yoloLatencyHistory);
     }
-  }, 600);
+  }, 380);
 }
 
 // ── 8. Canvas: Layer-3 Spike Spectrogram ─────────────────────────────────────

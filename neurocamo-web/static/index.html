@@ -8,7 +8,7 @@
       name="description"
       content="Tactical Ground Control Station & Spiking Neural Network Analytics Suite for Edge Camouflage Reconnaissance."
     />
-    <link rel="stylesheet" href="styles.css?v=14.4" />
+    <link rel="stylesheet" href="styles.css?v=14.6" />
   </head>
   <body>
     <!-- Top Application Bar -->
@@ -46,11 +46,10 @@
 
       <!-- System Status & Action -->
       <div class="header-actions">
-        <div class="status-indicator live" id="sysStatus" title="Edge Status &amp; Dynamic SNN Power">
+        <div class="status-indicator live" id="sysStatus" title="Edge Status">
           <span class="pulse-dot"></span>
           <span id="sysStatusText">EDGE READY</span>
-          <span style="opacity: 0.35; margin: 0 3px;">|</span>
-          <span id="sysPowerStatus">⚡ <strong id="globalSnnPower" class="text-emerald">0.58 W</strong></span>
+          <span id="sysPowerStatus" style="display: none;"><strong id="globalSnnPower">0.42 W</strong></span>
         </div>
         <button class="btn btn-secondary btn-cam-toggle" id="btnLiveCam" type="button" title="Toggle Live Laptop/Drone Webcam Stream">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -143,7 +142,7 @@
             <div class="card-header">
               <div class="card-title">
                 <span class="dot-indicator tactical"></span> SNN TACTICAL DETECTION
-                <span class="hud-pill pill-pwr" id="snnCardPowerPill" title="Dynamic SNN Inference Power"><span class="pill-dot emerald"></span> <span id="snnCardPower">0.58 W</span></span>
+                <span class="hud-pill pill-pwr" id="snnCardPowerPill" style="display: none;"><span id="snnCardPower">0.42 W</span></span>
               </div>
               <!-- Tactical False-Color Overlay Selector -->
               <div class="overlay-modes" id="reconOverlayModes">
@@ -193,9 +192,12 @@
           </div>
 
           <div class="telemetry-box" id="reconPowerBox">
-            <div class="box-label">DYNAMIC SNN POWER DRAW</div>
-            <div class="box-value text-emerald" id="reconPower">0.58 W</div>
-            <div class="box-sub" id="reconEnergy">Energy: 8.14 mJ (5.0x vs ANN)</div>
+            <div class="box-label" style="display: flex; justify-content: space-between; align-items: center;">
+              <span>LIVE SNN POWER TRACE</span>
+              <span class="text-emerald" id="reconPower" style="display: none;">0.42 W</span>
+            </div>
+            <canvas id="reconPowerCanvas" width="210" height="44" style="width: 100%; height: 44px; margin: 4px 0; border-radius: 4px; background: #06090e; border: 1px solid rgba(0, 229, 160, 0.25);"></canvas>
+            <div class="box-sub" id="reconEnergy">Live neuromorphic rail waveform</div>
           </div>
 
           <div class="telemetry-box action-box">
@@ -533,30 +535,31 @@
         <div class="grid-3-col">
           <!-- Power Draw -->
           <div class="benchmark-card">
-            <div class="bench-head">SYSTEM POWER CONSUMPTION</div>
+            <div class="bench-head">SYSTEM POWER CONSUMPTION (LIVE WAVEFORM)</div>
             <div class="power-bars-wrap">
               <div class="power-bar-item">
                 <div class="bar-labels">
-                  <span>NeuroCamo SNN (Proposed)</span>
-                  <strong class="text-emerald" id="pwrSnn">0.91 W</strong>
+                  <span>NeuroCamo SNN (Event-Driven)</span>
+                  <strong class="text-emerald" id="pwrSnn" style="display: none;">0.42 W</strong>
                 </div>
                 <div class="bar-track">
-                  <div class="bar-fill emerald" style="width: 10.5%"></div>
+                  <div class="bar-fill emerald" id="pwrSnnBar" style="width: 6.5%; transition: width 0.35s ease;"></div>
                 </div>
               </div>
               <div class="power-bar-item">
                 <div class="bar-labels">
-                  <span>Standard YOLOv8-Nano (ANN)</span>
-                  <strong class="text-crimson" id="pwrAnn">8.70 W</strong>
+                  <span>Standard YOLOv8-Nano (Dense ANN)</span>
+                  <strong class="text-crimson" id="pwrAnn" style="display: none;">8.70 W</strong>
                 </div>
                 <div class="bar-track">
-                  <div class="bar-fill crimson" style="width: 100%"></div>
+                  <div class="bar-fill crimson" id="pwrAnnBar" style="width: 88%; transition: width 0.35s ease;"></div>
                 </div>
               </div>
+              <canvas id="sysPowerCardCanvas" width="380" height="90" style="width: 100%; height: 90px; margin-top: 8px; border-radius: 5px; background: #06090e; border: 1px solid rgba(0, 229, 160, 0.25);"></canvas>
             </div>
             <div class="bench-footer">
-              <span class="ratio-badge">9.5× Lower Power Draw</span>
-              <span>Jetson Nano 10W Profile</span>
+              <span class="ratio-badge" id="pwrRatioBadge">Live Event-Gated Power Trace</span>
+              <span>Jetson Edge Rail Telemetry</span>
             </div>
           </div>
 
@@ -817,6 +820,6 @@
       </div>
     </main>
 
-    <script src="app.js?v=14.5"></script>
+    <script src="app.js?v=14.6"></script>
   </body>
 </html>

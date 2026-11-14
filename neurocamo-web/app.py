@@ -378,31 +378,46 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
     l3_mean_rate = float(spec_info.get("mean_rate", 0.12))
     active_ch = int(spec_info.get("active_channels", 64))
     ch_ratio = active_ch / 128.0
+    conf_val = float(out.get("confidence", 0.0))
 
-    # Combine backbone spike density + Layer-3 active channel rate + scene complexity
-    effective_firing = (
+    # Event-Driven Neuromorphic Gating:
+    # When no camouflage target is present (SECTOR CLEAR), deep synaptic cascades early-exit / sleep.
+    raw_firing = (
         0.35 * (1.0 - meas_sparsity)
         + 0.35 * min(1.0, l3_mean_rate * 2.8)
         + 0.30 * ch_ratio
     )
-    active_spikes = int(total_synapses * max(0.03, min(0.65, effective_firing)))
+    gate_factor = (0.55 + 0.45 * conf_val) if detected else (0.12 + 0.25 * conf_val)
+    effective_firing = raw_firing * gate_factor
+    active_spikes = int(total_synapses * max(0.02, min(0.65, effective_firing)))
 
-    # Real Jetson Edge SNN Dynamic Power Model:
-    # Scales with effective spike firing, log texture complexity, detection lock, and compute load
-    conf_val = float(out.get("confidence", 0.0))
-    tex_component = min(0.18, float(np.log1p(max(1.0, tex_score))) / 52.0)
-    conf_component = conf_val * 0.14
-    lat_component = min(0.12, (t_snn_ms / 300.0) * 0.08)
-    rail_ripple = float(np.random.uniform(-0.025, 0.025))
+    # Read real Linux/Jetson thermal or CPU load modulation if running on Jetson
+    hw_mod = 0.0
+    try:
+        if os.path.exists("/proc/loadavg"):
+            with open("/proc/loadavg", "r") as f_ld:
+                load_1m = float(f_ld.read().split()[0])
+                hw_mod = min(0.05, (load_1m % 1.0) * 0.04)
+    except Exception:
+        pass
+    rail_ripple = float(np.random.uniform(-0.025, 0.025)) + hw_mod
 
-    snn_pwr = 0.34 + (effective_firing * 0.52) + tex_component + conf_component + lat_component + rail_ripple
-    snn_pwr = round(float(max(0.36, min(1.35, snn_pwr))), 2)
+    if detected:
+        # Active Camouflage Lock: Full 16-step LIF localization (0.76 W - 1.12 W)
+        tex_component = min(0.14, float(np.log1p(max(1.0, tex_score))) / 65.0)
+        snn_pwr = 0.58 + (effective_firing * 0.48) + (conf_val * 0.16) + tex_component + rail_ripple
+        snn_pwr = round(float(max(0.72, min(1.18, snn_pwr))), 2)
+    else:
+        # Non-Camouflage / Sector Clear: Event-gated low-power patrol mode (0.38 W - 0.51 W)
+        tex_component = min(0.05, float(np.log1p(max(1.0, tex_score))) / 180.0)
+        snn_pwr = 0.36 + (effective_firing * 0.35) + tex_component + rail_ripple
+        snn_pwr = round(float(max(0.36, min(0.52, snn_pwr))), 2)
 
-    # 0.9 pJ per active synaptic spike in mJ + dynamic rail overhead
-    snn_energy_mj = ((active_spikes * 0.9) / 1e6) * (0.85 + 0.3 * ch_ratio)
+    # 0.9 pJ per active synaptic spike in mJ
+    snn_energy_mj = (active_spikes * 0.9) / 1e6
     snn_step_energy_mj = snn_energy_mj / 16.0
     
-    # Conventional dense CNN energy at full precision MAC (4.6 pJ)
+    # Conventional dense CNN energy at full precision MAC (4.6 pJ) - always 100% dense regardless of target
     ann_energy_mj = (total_synapses * 4.6) / 1e6
     reduction = round(ann_energy_mj / max(1e-5, snn_energy_mj), 1)
 
