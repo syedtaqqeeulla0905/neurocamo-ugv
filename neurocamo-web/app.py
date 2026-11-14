@@ -389,8 +389,9 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
 
     # Real Jetson Edge SNN Dynamic Power Model:
     # Scales with effective spike firing, log texture complexity, detection lock, and compute load
+    conf_val = float(out.get("confidence", 0.0))
     tex_component = min(0.18, float(np.log1p(max(1.0, tex_score))) / 52.0)
-    conf_component = float(conf) * 0.14
+    conf_component = conf_val * 0.14
     lat_component = min(0.12, (t_snn_ms / 300.0) * 0.08)
     rail_ripple = float(np.random.uniform(-0.025, 0.025))
 
