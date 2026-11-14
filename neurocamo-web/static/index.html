@@ -8,7 +8,7 @@
       name="description"
       content="Tactical Ground Control Station & Spiking Neural Network Analytics Suite for Edge Camouflage Reconnaissance."
     />
-    <link rel="stylesheet" href="styles.css?v=14.6" />
+    <link rel="stylesheet" href="styles.css?v=15.4" />
   </head>
   <body>
     <!-- Top Application Bar -->
@@ -49,7 +49,14 @@
         <div class="status-indicator live" id="sysStatus" title="Edge Status">
           <span class="pulse-dot"></span>
           <span id="sysStatusText">EDGE READY</span>
-          <span id="sysPowerStatus" style="display: none;"><strong id="globalSnnPower">0.42 W</strong></span>
+          <span id="sysPowerStatus" style="display: none;">· <strong id="globalSnnPower">-- W</strong></span>
+        </div>
+        <div class="ws-status-pill connecting" id="wsLinkBadge" title="WebSocket Live Telemetry Stream (/ws/power)">
+          <span class="ws-dot"></span>
+          <span id="wsLinkText">WS: CONNECTING</span>
+        </div>
+        <div class="hw-source-pill" id="hwSourceBadge" title="Active Hardware Telemetry Source">
+          <span id="hwSourceText">SENSOR: PROBING...</span>
         </div>
         <button class="btn btn-secondary btn-cam-toggle" id="btnLiveCam" type="button" title="Toggle Live Laptop/Drone Webcam Stream">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -91,6 +98,33 @@
 
     <!-- Main Content Area -->
     <main class="app-main">
+      <!-- Live Hardware Power Telemetry Strip (visible across Recon, Compare & Spikes) -->
+      <div class="panel-card live-power-strip" id="livePowerStrip">
+        <div class="card-header live-strip-header">
+          <div class="live-strip-title-group">
+            <span class="dot-indicator tactical"></span>
+            <span class="card-title">LIVE HARDWARE POWER TELEMETRY</span>
+            <span class="session-chip" id="miniSessionName">Awaiting benchmark...</span>
+            <span class="phase-badge idle" id="miniPhaseBadge">STANDBY</span>
+            <span class="source-truth-badge" id="miniSourceBadge">SENSOR: PROBING...</span>
+          </div>
+          <div class="live-strip-metrics">
+            <span class="strip-metric">RAIL: <strong id="miniLiveWatts">-- W</strong></span>
+            <span class="strip-metric">SNN AVG: <strong class="text-emerald" id="miniSnnAvgW">-- W</strong></span>
+            <span class="strip-metric">YOLO AVG: <strong class="text-crimson" id="miniYoloAvgW">-- W</strong></span>
+            <button class="btn btn-sm btn-secondary" id="btnMiniToPower" type="button">Full Profiler &amp; History →</button>
+            <button class="btn btn-sm btn-secondary" id="btnToggleMiniChart" type="button" title="Collapse or expand live waveform">Hide</button>
+          </div>
+        </div>
+        <div class="live-strip-body" id="livePowerStripBody">
+          <div id="echartsMiniFallbackBanner" class="echarts-fallback-banner compact" style="display: none;">
+            Apache ECharts CDN unavailable (offline environment) — rendering live WebSocket hardware telemetry on Canvas fallback.
+          </div>
+          <div id="echartsPowerMini" class="echarts-power-mini"></div>
+          <canvas id="miniPowerFallbackCanvas" width="900" height="145" style="display: none; width: 100%; height: 145px;"></canvas>
+        </div>
+      </div>
+
       <!-- ═══════════════════════════════════════════════════════════════ -->
       <!-- VIEW 0: GENERAL TACTICAL RECONNAISSANCE (RAW vs SNN MASK)       -->
       <!-- ═══════════════════════════════════════════════════════════════ -->
@@ -142,7 +176,7 @@
             <div class="card-header">
               <div class="card-title">
                 <span class="dot-indicator tactical"></span> SNN TACTICAL DETECTION
-                <span class="hud-pill pill-pwr" id="snnCardPowerPill" style="display: none;"><span id="snnCardPower">0.42 W</span></span>
+                <span class="hud-pill pill-pwr" id="snnCardPowerPill" style="display: none;"><span id="snnCardPower">-- W</span></span>
               </div>
               <!-- Tactical False-Color Overlay Selector -->
               <div class="overlay-modes" id="reconOverlayModes">
@@ -194,10 +228,10 @@
           <div class="telemetry-box" id="reconPowerBox">
             <div class="box-label" style="display: flex; justify-content: space-between; align-items: center;">
               <span>LIVE SNN POWER TRACE</span>
-              <span class="text-emerald" id="reconPower" style="display: none;">0.42 W</span>
+              <span class="text-emerald" id="reconPower">-- W</span>
             </div>
             <canvas id="reconPowerCanvas" width="210" height="44" style="width: 100%; height: 44px; margin: 4px 0; border-radius: 4px; background: #06090e; border: 1px solid rgba(0, 229, 160, 0.25);"></canvas>
-            <div class="box-sub" id="reconEnergy">Live neuromorphic rail waveform</div>
+            <div class="box-sub" id="reconEnergy">Awaiting hardware telemetry</div>
           </div>
 
           <div class="telemetry-box action-box">
@@ -226,8 +260,8 @@
             </p>
           </div>
           <div class="header-right-actions">
-            <span class="hud-pill"><span class="pill-dot emerald"></span> SNN: <span id="hdrSnnPower">0.91W</span></span>
-            <span class="hud-pill"><span class="pill-dot crimson"></span> YOLO: <span id="hdrYoloPower">8.70W (9.5x)</span></span>
+            <span class="hud-pill"><span class="pill-dot emerald"></span> SNN: <span id="hdrSnnPower">-- W</span></span>
+            <span class="hud-pill"><span class="pill-dot crimson"></span> YOLO: <span id="hdrYoloPower">-- W</span></span>
           </div>
         </div>
 
@@ -524,181 +558,259 @@
       <section class="view" id="view-power">
         <div class="view-header">
           <div>
-            <h2 class="view-title">Ultra Low Power Edge Benchmarks & Profiling</h2>
+            <h2 class="view-title">Real-Time Hardware Power Profiler &amp; Efficiency Benchmarks</h2>
             <p class="view-desc">
-              Empirical and theoretical energy validation: Event-Driven SNN vs Standard Dense YOLOv8 on Jetson Nano.
+              Live WebSocket hardware telemetry (INA3221 / tegrastats / NVML / psutil) &amp; multi-session SNN vs YOLOv8-Nano energy comparison.
             </p>
           </div>
-        </div>
-
-        <!-- Top Power Comparison Cards -->
-        <div class="grid-3-col">
-          <!-- Power Draw -->
-          <div class="benchmark-card">
-            <div class="bench-head">SYSTEM POWER CONSUMPTION (LIVE WAVEFORM)</div>
-            <div class="power-bars-wrap">
-              <div class="power-bar-item">
-                <div class="bar-labels">
-                  <span>NeuroCamo SNN (Event-Driven)</span>
-                  <strong class="text-emerald" id="pwrSnn" style="display: none;">0.42 W</strong>
-                </div>
-                <div class="bar-track">
-                  <div class="bar-fill emerald" id="pwrSnnBar" style="width: 6.5%; transition: width 0.35s ease;"></div>
-                </div>
-              </div>
-              <div class="power-bar-item">
-                <div class="bar-labels">
-                  <span>Standard YOLOv8-Nano (Dense ANN)</span>
-                  <strong class="text-crimson" id="pwrAnn" style="display: none;">8.70 W</strong>
-                </div>
-                <div class="bar-track">
-                  <div class="bar-fill crimson" id="pwrAnnBar" style="width: 88%; transition: width 0.35s ease;"></div>
-                </div>
-              </div>
-              <canvas id="sysPowerCardCanvas" width="380" height="90" style="width: 100%; height: 90px; margin-top: 8px; border-radius: 5px; background: #06090e; border: 1px solid rgba(0, 229, 160, 0.25);"></canvas>
-            </div>
-            <div class="bench-footer">
-              <span class="ratio-badge" id="pwrRatioBadge">Live Event-Gated Power Trace</span>
-              <span>Jetson Edge Rail Telemetry</span>
-            </div>
-          </div>
-
-          <!-- Battery Autonomy -->
-          <div class="benchmark-card">
-            <div class="bench-head">BATTERY AUTONOMY CALCULATOR</div>
-            <div class="calc-row">
-              <label for="battSlider">12V Li-ion Battery Pack:</label>
-              <span id="battCapText" class="text-cyan">5200 mAh (62.4 Wh)</span>
-            </div>
-            <input type="range" id="battSlider" min="2000" max="10000" step="200" value="5200" class="app-slider" />
-            <div class="autonomy-results">
-              <div class="autonomy-item">
-                <div class="auto-num text-emerald" id="autoSnn">34.8 hrs</div>
-                <div class="auto-lbl">NeuroCamo SNN Runtime</div>
-              </div>
-              <div class="autonomy-item">
-                <div class="auto-num text-crimson" id="autoAnn">3.8 hrs</div>
-                <div class="auto-lbl">Standard ANN Runtime</div>
-              </div>
-            </div>
-            <div class="bench-footer">
-              <span class="ratio-badge">+31.0 Extra Patrol Hours</span>
-            </div>
-          </div>
-
-          <!-- Theoretical CMOS Model -->
-          <div class="benchmark-card">
-            <div class="bench-head">HOROWITZ CMOS 45nm MODEL</div>
-            <div class="math-box">
-              <code>E<sub>SNN</sub> = N<sub>AC</sub> · E<sub>AC</sub> · (1 - S) = 0.18 mJ</code>
-              <code>E<sub>ANN</sub> = N<sub>MAC</sub> · E<sub>MAC</sub> = 2.45 mJ</code>
-            </div>
-            <div class="cmos-constants">
-              <div><span>E<sub>AC</sub> (Accumulate):</span> <strong>0.9 pJ</strong></div>
-              <div><span>E<sub>MAC</sub> (Mult-Accumulate):</span> <strong>4.6 pJ</strong></div>
-              <div><span>MAC/AC Energy Ratio:</span> <strong>5.11×</strong></div>
-              <div><span>Breakeven Sparsity:</span> <strong>62.1%</strong></div>
-            </div>
+          <div class="header-right-actions">
+            <span class="source-truth-badge" id="powerViewSourceBadge">SENSOR: PROBING...</span>
+            <span class="phase-badge idle" id="powerViewPhaseBadge">STANDBY</span>
           </div>
         </div>
 
-        <!-- Dual Time-Series Analyzer: Power (Watts) & Latency (ms) -->
-        <div class="panel-card" style="margin-top: 20px; border-left: 3px solid var(--color-cyan);">
-          <div class="card-header">
-            <div>
-              <div class="card-title">
-                <span class="dot-indicator tactical"></span> DUAL LIVE TIME-SERIES ANALYZER: SNN vs YOLOV8-NANO
+        <div class="power-stack">
+          <!-- ROW 1: Three balanced summary cards -->
+          <div class="grid-3-col power-top-row">
+            <!-- Power Draw -->
+            <div class="benchmark-card">
+              <div class="bench-head">MEASURED POWER CONSUMPTION (SESSION AVG)</div>
+              <div class="bench-body">
+                <div class="power-bar-item">
+                  <div class="bar-labels">
+                    <span>NeuroCamo SNN (Event-Driven)</span>
+                    <strong class="text-emerald" id="pwrSnn">-- W</strong>
+                  </div>
+                  <div class="bar-track">
+                    <div class="bar-fill emerald" id="pwrSnnBar" style="width: 0%; transition: width 0.35s ease;"></div>
+                  </div>
+                </div>
+                <div class="power-bar-item">
+                  <div class="bar-labels">
+                    <span>Standard YOLOv8-Nano (Dense ANN)</span>
+                    <strong class="text-crimson" id="pwrAnn">-- W</strong>
+                  </div>
+                  <div class="bar-track">
+                    <div class="bar-fill crimson" id="pwrAnnBar" style="width: 0%; transition: width 0.35s ease;"></div>
+                  </div>
+                </div>
+                <canvas id="sysPowerCardCanvas" class="spark-canvas" width="380" height="72"></canvas>
               </div>
-              <div class="card-meta">Real-time Comparative Hardware Profiler (Jetson Nano 10W Profile)</div>
+              <div class="bench-footer">
+                <span class="ratio-badge" id="pwrRatioBadge">Awaiting Benchmark</span>
+                <span id="pwrSensorFooter">Hardware Telemetry</span>
+              </div>
             </div>
-            <div class="time-series-legend">
-              <span class="legend-chip"><span class="legend-line emerald"></span> NeuroCamo SNN (Our Model)</span>
-              <span class="legend-chip"><span class="legend-line crimson"></span> Conventional YOLOv8-Nano (Dense CNN)</span>
+
+            <!-- Battery Autonomy -->
+            <div class="benchmark-card">
+              <div class="bench-head">BATTERY AUTONOMY CALCULATOR</div>
+              <div class="bench-body">
+                <div class="calc-row">
+                  <label for="battSlider">12V Li-ion Battery Pack:</label>
+                  <span id="battCapText" class="text-cyan">5200 mAh (62.4 Wh)</span>
+                </div>
+                <input type="range" id="battSlider" min="2000" max="10000" step="200" value="5200" class="app-slider" />
+                <div class="autonomy-results">
+                  <div class="autonomy-item">
+                    <div class="auto-num text-emerald" id="autoSnn">-- hrs</div>
+                    <div class="auto-lbl">NeuroCamo SNN Runtime</div>
+                  </div>
+                  <div class="autonomy-item">
+                    <div class="auto-num text-crimson" id="autoAnn">-- hrs</div>
+                    <div class="auto-lbl">Standard ANN Runtime</div>
+                  </div>
+                </div>
+              </div>
+              <div class="bench-footer">
+                <span class="ratio-badge" id="autoExtraHours">Calculated from measured power</span>
+              </div>
+            </div>
+
+            <!-- Theoretical CMOS Model -->
+            <div class="benchmark-card">
+              <div class="bench-head">THEORETICAL HOROWITZ CMOS 45nm MODEL</div>
+              <div class="bench-body">
+                <div class="math-box">
+                  <code>E<sub>SNN</sub> = N<sub>AC</sub> · E<sub>AC</sub> · (1 - S)</code>
+                  <code>E<sub>ANN</sub> = N<sub>MAC</sub> · E<sub>MAC</sub></code>
+                </div>
+                <div class="cmos-constants">
+                  <div><span>E<sub>AC</sub> (Accumulate):</span> <strong>0.9 pJ</strong></div>
+                  <div><span>E<sub>MAC</sub> (Mult-Accumulate):</span> <strong>4.6 pJ</strong></div>
+                  <div><span>MAC/AC Energy Ratio:</span> <strong>5.11×</strong></div>
+                  <div><span>Breakeven Sparsity:</span> <strong>62.1%</strong></div>
+                </div>
+              </div>
+              <div class="bench-footer">
+                <span class="ratio-badge">Theoretical</span>
+                <span>Horowitz, ISSCC 2014 (45nm)</span>
+              </div>
             </div>
           </div>
-          <div class="card-body">
-            <div class="grid-2-col">
-              <!-- Graph 1: Power Consumption (Watts) Trace -->
-              <div class="time-series-subcard">
-                <div class="subcard-title">
-                  <span>1. CONTINUOUS POWER DRAW (WATTS)</span>
-                  <span class="subcard-badge text-emerald" id="livePwrAdv">9.1× Lower Draw</span>
-                </div>
-                <canvas id="powerTraceCanvas" width="540" height="200"></canvas>
-                <div class="sparsity-stats-row" style="margin-top: 12px;">
-                  <div class="stat-pill">
-                    <div class="stat-val text-emerald" id="liveSnnPwrVal">0.97 W</div>
-                    <div class="stat-lbl">SNN Event-Driven Power</div>
-                    <div class="stat-sub">Spike activity dependent</div>
-                  </div>
-                  <div class="stat-pill">
-                    <div class="stat-val text-crimson" id="liveYoloPwrVal">8.85 W</div>
-                    <div class="stat-lbl">YOLOv8 Dense Power</div>
-                    <div class="stat-sub">100% Tensor Core load</div>
-                  </div>
-                  <div class="stat-pill">
-                    <div class="stat-val text-cyan" id="livePwrRatioVal">9.1×</div>
-                    <div class="stat-lbl">Power Conservation</div>
-                    <div class="stat-sub">Dynamic wattage delta</div>
-                  </div>
-                </div>
-              </div>
 
-              <!-- Graph 2: Inference Latency (ms) Trace -->
-              <div class="time-series-subcard">
-                <div class="subcard-title">
-                  <span>2. REAL-TIME EDGE LATENCY &amp; FPS</span>
-                  <span class="subcard-badge text-cyan" id="liveLatAdv">3.2× Speedup</span>
+          <!-- ROW 2: Dual Live Time-Series Analyzer (full width, two matched charts) -->
+          <div class="panel-card dual-analyzer echarts-main-card">
+            <div class="card-header">
+              <div>
+                <div class="card-title">
+                  <span class="dot-indicator tactical"></span> DUAL LIVE TIME-SERIES ANALYZER: SNN vs YOLOV8-NANO
                 </div>
-                <canvas id="latencyCanvas" width="540" height="200"></canvas>
-                <div class="sparsity-stats-row" style="margin-top: 12px;">
-                  <div class="stat-pill">
-                    <div class="stat-val text-emerald" id="liveLatencyVal">16.1 ms</div>
-                    <div class="stat-lbl">SNN Latency (~62 FPS)</div>
-                    <div class="stat-sub">Poisson temporal stream</div>
-                  </div>
-                  <div class="stat-pill">
-                    <div class="stat-val text-crimson" id="liveYoloLatencyVal">52.3 ms</div>
-                    <div class="stat-lbl">YOLOv8 Latency (~19 FPS)</div>
-                    <div class="stat-sub">8.70 GFLOPs matrix dense</div>
-                  </div>
-                  <div class="stat-pill">
-                    <div class="stat-val text-cyan" id="liveLatRatioVal">3.2×</div>
-                    <div class="stat-lbl">Real-time Speedup</div>
-                    <div class="stat-sub">Jetson Nano edge execution</div>
-                  </div>
+                <div class="card-meta" id="mainChartMeta">Live WebSocket Telemetry — Continuous 150ms Hardware Sampling</div>
+              </div>
+              <div class="echarts-header-controls">
+                <div class="session-select-wrap">
+                  <label for="sessionSelect" class="session-select-lbl">SESSION:</label>
+                  <select id="sessionSelect" class="mode-dropdown session-select" title="Inspect live or historical upload benchmark session">
+                    <option value="">Awaiting first benchmark...</option>
+                  </select>
                 </div>
+                <span class="source-truth-badge" id="mainSourceBadge">SENSOR: PROBING...</span>
+                <span class="phase-badge idle" id="mainPhaseBadge">STANDBY</span>
               </div>
             </div>
-            <div class="card-note" style="margin-top: 15px;">
-              Dual time-series analyzer plots rolling hardware execution across continuous optical frames. SNN dynamically modulates wattage based on synaptic sparsity (event-driven), whereas YOLO consumes constant high-power dense GEMM tensor operations.
+            <div class="card-body dual-body">
+              <div id="echartsFallbackBanner" class="echarts-fallback-banner" style="display: none;">
+                ⚠ Apache ECharts CDN unavailable (offline mode) — displaying real-time WebSocket hardware trace via HTML5 Canvas fallback.
+              </div>
+              <div class="dual-grid">
+                <!-- Left: Power -->
+                <section class="chart-col">
+                  <div class="chart-col-head">
+                    <span class="chart-col-title">1. CONTINUOUS POWER DRAW (WATTS)</span>
+                    <span class="legend-inline">
+                      <span class="legend-chip"><span class="legend-line emerald"></span> SNN</span>
+                      <span class="legend-chip"><span class="legend-line crimson"></span> YOLOv8</span>
+                    </span>
+                  </div>
+                  <div class="chart-box">
+                    <div id="echartsPowerMain" class="echarts-power-main"></div>
+                    <canvas id="powerTraceCanvas" width="720" height="260" style="display: none;"></canvas>
+                  </div>
+                  <div class="power-kpi-grid">
+                    <div class="stat-pill">
+                      <div class="stat-val text-emerald" id="liveSnnPwrVal">-- W</div>
+                      <div class="stat-lbl">SNN Avg Power</div>
+                      <div class="stat-sub">Peak: <span id="liveSnnPeakVal">-- W</span> | <span id="liveSnnEnergyVal">-- mJ</span></div>
+                    </div>
+                    <div class="stat-pill">
+                      <div class="stat-val text-crimson" id="liveYoloPwrVal">-- W</div>
+                      <div class="stat-lbl">YOLOv8 Avg Power</div>
+                      <div class="stat-sub">Peak: <span id="liveYoloPeakVal">-- W</span> | <span id="liveYoloEnergyVal">-- mJ</span></div>
+                    </div>
+                    <div class="stat-pill">
+                      <div class="stat-val text-cyan" id="livePwrRatioVal">--×</div>
+                      <div class="stat-lbl">Power Ratio (YOLO / SNN)</div>
+                      <div class="stat-sub"><span id="livePwrAdv">Awaiting trace</span> · <span id="liveEnergySavingsVal">--% energy saved</span></div>
+                    </div>
+                    <div class="stat-pill">
+                      <div class="stat-val" id="liveRailNowVal">-- W</div>
+                      <div class="stat-lbl">Instant Hardware Rail</div>
+                      <div class="stat-sub" id="liveCpuGpuVal">CPU: --% | GPU: --%</div>
+                    </div>
+                  </div>
+                </section>
+
+                <!-- Right: Latency -->
+                <section class="chart-col">
+                  <div class="chart-col-head">
+                    <span class="chart-col-title">2. REAL-TIME EDGE LATENCY &amp; FPS</span>
+                    <span class="subcard-badge text-cyan" id="liveLatAdv">--× Speedup</span>
+                  </div>
+                  <div class="chart-box">
+                    <canvas id="latencyCanvas" width="720" height="260"></canvas>
+                  </div>
+                  <div class="latency-kpi-grid">
+                    <div class="stat-pill">
+                      <div class="stat-val text-emerald" id="liveLatencyVal">-- ms</div>
+                      <div class="stat-lbl">SNN Mean Latency</div>
+                      <div class="stat-sub" id="liveSnnFpsSub">Throughput: -- FPS</div>
+                    </div>
+                    <div class="stat-pill">
+                      <div class="stat-val text-crimson" id="liveYoloLatencyVal">-- ms</div>
+                      <div class="stat-lbl">YOLOv8 Mean Latency</div>
+                      <div class="stat-sub" id="liveYoloFpsSub">8.70 GFLOPs dense pass</div>
+                    </div>
+                    <div class="stat-pill">
+                      <div class="stat-val text-cyan" id="liveLatRatioVal">--×</div>
+                      <div class="stat-lbl">Real-time Speedup</div>
+                      <div class="stat-sub">Session-averaged ratio</div>
+                    </div>
+                    <div class="stat-pill">
+                      <div class="stat-val" id="liveThroughputAdvVal">-- FPS</div>
+                      <div class="stat-lbl">Edge Throughput Rate</div>
+                      <div class="stat-sub" id="liveThroughputDeltaSub">SNN vs YOLO Delta</div>
+                    </div>
+                  </div>
+                </section>
+              </div>
+              <div class="card-note">
+                Green: NeuroCamo SNN power during its inference window · Red: YOLOv8-Nano on the identical image · Slate dashed: baseline / cooldown intervals.
+              </div>
             </div>
           </div>
-        </div>
 
-        <div class="grid-2-col" style="margin-top: 20px;">
+          <!-- ROW 3: Synaptic energy per frame (full width: chart + stacked stats) -->
+          <div class="panel-card energy-card">
+            <div class="card-header">
+              <div class="card-title">SYNAPTIC ENERGY PER FRAME (THEORETICAL CMOS + HARDWARE)</div>
+              <div class="card-meta">Horowitz 45nm CMOS vs Measured Rail</div>
+            </div>
+            <div class="card-body energy-body">
+              <div class="energy-chart-box">
+                <canvas id="energyCanvas" width="900" height="200"></canvas>
+              </div>
+              <div class="energy-stats">
+                <div class="stat-pill">
+                  <div class="stat-val highlight" id="frameEnergyVal">-- mJ</div>
+                  <div class="stat-lbl">SNN CMOS Spike Energy</div>
+                </div>
+                <div class="stat-pill">
+                  <div class="stat-val text-crimson" id="annEnergyVal">-- mJ</div>
+                  <div class="stat-lbl">Dense ANN CMOS Energy</div>
+                </div>
+                <div class="stat-pill">
+                  <div class="stat-val text-cyan" id="savingsFactorVal">--×</div>
+                  <div class="stat-lbl">Theoretical Reduction</div>
+                </div>
+              </div>
+            </div>
+          </div>
 
-          <!-- Dynamic Synaptic Energy & Spike Distribution -->
+          <!-- ROW 4: Multi-session benchmark history -->
           <div class="panel-card">
             <div class="card-header">
-              <div class="card-title">DYNAMIC SYNAPTIC ENERGY PER FRAME</div>
-              <div class="card-meta">Real-time Horowitz CMOS Calculation</div>
+              <div>
+                <div class="card-title">
+                  <span class="dot-indicator"></span> BENCHMARK SESSION HISTORY (MULTI-UPLOAD COMPARISON)
+                </div>
+                <div class="card-meta">Every image upload creates a preserved benchmark session — click any row to inspect its complete waveform</div>
+              </div>
+              <span class="hud-pill" id="sessionCountBadge">0 Sessions Recorded</span>
             </div>
-            <div class="card-body">
-              <canvas id="energyCanvas" width="540" height="190"></canvas>
-              <div class="sparsity-stats-row" style="margin-top: 14px;">
-                <div class="stat-pill">
-                  <div class="stat-val highlight" id="frameEnergyVal">0.0 mJ</div>
-                  <div class="stat-lbl">SNN Frame Energy</div>
-                </div>
-                <div class="stat-pill">
-                  <div class="stat-val text-crimson" id="annEnergyVal">0.0 mJ</div>
-                  <div class="stat-lbl">Dense ANN Baseline</div>
-                </div>
-                <div class="stat-pill">
-                  <div class="stat-val text-cyan" id="savingsFactorVal">0.0x</div>
-                  <div class="stat-lbl">Energy Reduction</div>
-                </div>
+            <div class="card-body no-pad">
+              <div class="session-table-wrap">
+                <table class="session-history-table" id="sessionHistoryTable">
+                  <thead>
+                    <tr>
+                      <th>Session / Image</th>
+                      <th>Hardware Source</th>
+                      <th>SNN Avg / Peak</th>
+                      <th>SNN Energy (Total / Inf)</th>
+                      <th>SNN Latency</th>
+                      <th>YOLOv8 Avg / Peak</th>
+                      <th>YOLOv8 Energy (Total / Inf)</th>
+                      <th>YOLOv8 Latency</th>
+                      <th>Efficiency</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="sessionHistoryBody">
+                    <tr>
+                      <td colspan="10" class="session-empty-cell">No benchmark sessions recorded yet. Upload an image or click a sample to start live hardware profiling.</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
@@ -724,9 +836,9 @@
               <div class="dossier-agency">PROJECT NEUROCAMO — ADVANCED NEUROMORPHIC GCS</div>
               <div class="dossier-subhead">Tactical Camouflage Saliency &amp; Edge Energy Telemetry Report</div>
               <div class="dossier-meta-grid">
-                <div><strong>DATE / UTC:</strong> <span id="dosTimestamp">2026-10-29 20:00:00 UTC</span></div>
-                <div><strong>MISSION CODE:</strong> <span id="dosMissionCode">NC-RECON-774</span></div>
-                <div><strong>EDGE HARDWARE:</strong> NVIDIA Jetson Nano / TensorRT 8.2</div>
+                <div><strong>DATE / UTC:</strong> <span id="dosTimestamp">--</span></div>
+                <div><strong>SESSION / MISSION ID:</strong> <span id="dosMissionCode">--</span></div>
+                <div><strong>TELEMETRY HARDWARE:</strong> <span id="dosHardwareSource">Probing...</span></div>
                 <div><strong>SNN CHECKPOINT:</strong> best_model_v4.pth (Dense Spatial Mask)</div>
               </div>
             </div>
@@ -760,37 +872,37 @@
               <tbody>
                 <tr>
                   <td>Target Detection &amp; Localization</td>
-                  <td id="dosSnnVerdict" class="text-emerald">CAMOUFLAGE LOCK</td>
-                  <td id="dosYoloVerdict" class="text-crimson">0 OBJECTS DETECTED</td>
+                  <td id="dosSnnVerdict" class="text-emerald">--</td>
+                  <td id="dosYoloVerdict" class="text-crimson">--</td>
                   <td>SNN Penetrates Disruptive Camouflage</td>
                 </tr>
                 <tr>
                   <td>Model Confidence</td>
-                  <td id="dosSnnConf">78.3%</td>
-                  <td id="dosYoloConf">0.0%</td>
-                  <td id="dosConfAdv">+78.3% Confidence Differential</td>
+                  <td id="dosSnnConf">--%</td>
+                  <td id="dosYoloConf">--%</td>
+                  <td id="dosConfAdv">--</td>
                 </tr>
                 <tr>
                   <td>Edge Power Consumption</td>
-                  <td id="dosSnnPower">0.91 W</td>
-                  <td id="dosYoloPower">8.70 W</td>
-                  <td id="dosPowerAdv">9.5× Lower Power Draw</td>
+                  <td id="dosSnnPower">-- W</td>
+                  <td id="dosYoloPower">-- W</td>
+                  <td id="dosPowerAdv">--</td>
                 </tr>
                 <tr>
                   <td>Inference Energy per Frame</td>
-                  <td id="dosSnnEnergy">0.18 mJ</td>
-                  <td id="dosYoloEnergy">40.02 mJ</td>
-                  <td id="dosEnergyAdv">220× Synaptic Energy Efficiency</td>
+                  <td id="dosSnnEnergy">-- mJ</td>
+                  <td id="dosYoloEnergy">-- mJ</td>
+                  <td id="dosEnergyAdv">--</td>
                 </tr>
                 <tr>
                   <td>Inference Latency on Edge</td>
-                  <td id="dosSnnLat">16.1 ms (~62 FPS)</td>
-                  <td id="dosYoloLat">42.7 ms (~23 FPS)</td>
-                  <td id="dosLatAdv">2.6× Faster Edge Throughput</td>
+                  <td id="dosSnnLat">-- ms</td>
+                  <td id="dosYoloLat">-- ms</td>
+                  <td id="dosLatAdv">--</td>
                 </tr>
                 <tr>
                   <td>Neural Sparsity (Silent Synapses)</td>
-                  <td id="dosSnnSparsity">78.4% Silent</td>
+                  <td id="dosSnnSparsity">--% Silent</td>
                   <td>0.0% (Dense 8.7 GFLOPs)</td>
                   <td>Event-Driven Dynamic Zero-MAC</td>
                 </tr>
@@ -820,6 +932,10 @@
       </div>
     </main>
 
-    <script src="app.js?v=14.6"></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"
+      onerror="window.__echartsCdnFailed = true;"
+    ></script>
+    <script src="app.js?v=15.2"></script>
   </body>
 </html>

@@ -1,12 +1,23 @@
 /* ==========================================================================
    NEUROCAMO GCS & SNN ANALYTICS SUITE — CLIENT CONTROLLER
-   Full-featured SPA for Tactical Camouflage Reconnaissance & Spiking Analytics
+   Live WebSocket Hardware Telemetry + Apache ECharts + Multi-Session Profiler
    ========================================================================== */
 
 const BAND_COLORS = {
   sparse: [0, 229, 160],     // Emerald
   active: [245, 163, 0],     // Amber
   saturated: [255, 68, 85],  // Crimson
+};
+
+const PHASE_LABELS = {
+  idle_baseline: { text: "IDLE BASELINE", cls: "idle" },
+  snn_inference: { text: "NEUROCAMO SNN", cls: "snn" },
+  cooldown: { text: "COOLDOWN", cls: "cooldown" },
+  yolo_inference: { text: "YOLOV8-NANO", cls: "yolo" },
+  post_idle: { text: "POST IDLE", cls: "idle" },
+  complete: { text: "COMPLETE", cls: "complete" },
+  standby: { text: "STANDBY", cls: "idle" },
+  error: { text: "ERROR", cls: "yolo" },
 };
 
 const state = {
@@ -23,22 +34,43 @@ const state = {
   isPlayingTemporal: false,
   currentOverlay: "box", // "box", "saliency", "mask"
   isWebcamActive: false,
+  isRealSenseActive: false,
   webcamStream: null,
   webcamInterval: null,
+  rsTimeout: null,
   isProcessingCamFrame: false,
   batteryCapacityMah: 5200,
-  latencyHistory: [16.2, 16.8, 15.9, 16.4, 17.1, 16.0, 15.8, 16.5, 16.1],
-  yoloLatencyHistory: [52.4, 48.7, 51.2, 53.6, 50.1, 49.3, 52.8, 51.5, 52.3],
-  snnPowerHistory: [0.94, 0.96, 0.91, 0.95, 0.98, 0.92, 0.90, 0.97, 0.95],
-  yoloPowerHistory: [8.82, 8.75, 8.91, 8.85, 8.78, 8.89, 8.84, 8.79, 8.85],
-  currentEnergy: {
-    snn_energy_mj: 8.14,
-    ann_energy_mj: 40.02,
-    energy_reduction_factor: "5.0x",
+
+  // Real hardware telemetry & multi-session state (zero fake/seeded data)
+  ws: null,
+  wsConnected: false,
+  wsReconnectDelayMs: 500,
+  wsReconnectTimer: null,
+  miniCollapsed: false,
+  echartsAvailable: false,
+  echartsMain: null,
+  echartsMini: null,
+
+  sessions: [],        // Ordered newest-first summary objects
+  sessionMap: {},      // session_id -> { summary, samples: [], sampleKeys: Set, active: bool, currentPhase: str }
+  activeSessionId: null,
+  viewedSessionId: null,
+
+  sensorInfo: {
+    source: null,
+    is_estimated: false,
+    sensor_detail: "Probing hardware rail...",
   },
+  latestMeasuredSnnW: null,
+  latestMeasuredYoloW: null,
+
+  // Real completed-session history arrays for latency oscilloscope
+  latencyHistory: [],
+  yoloLatencyHistory: [],
+  currentEnergy: null,
 };
 
-// Safe DOM Helper Functions (prevents any 'Cannot set properties of undefined' crashes)
+// ── Safe DOM Helpers ─────────────────────────────────────────────────────────
 function getEl(id) {
   return document.getElementById(id);
 }
@@ -50,13 +82,6 @@ function setTxt(id, val) {
   }
 }
 
-function setProp(id, prop, val) {
-  const node = typeof id === "string" ? document.getElementById(id) : id;
-  if (node) {
-    node[prop] = val;
-  }
-}
-
 function setStyle(id, prop, val) {
   const node = typeof id === "string" ? document.getElementById(id) : id;
   if (node && node.style) {
@@ -64,22 +89,34 @@ function setStyle(id, prop, val) {
   }
 }
 
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 // ── Application Initialization ───────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", async () => {
   setupNavigation();
   setupEventListeners();
+  initPowerCharts();
 
   drawRateCurve([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-  drawPowerTraceChart(state.snnPowerHistory, state.yoloPowerHistory);
-  drawLatencyOscilloscope(state.latencyHistory, state.yoloLatencyHistory);
-  drawDynamicEnergyChart(state.currentEnergy);
+  drawLatencyOscilloscope([], []);
+  drawDynamicEnergyChart(null);
+  updateBatteryAutonomy(state.batteryCapacityMah);
 
+  // Connect WebSocket FIRST and wait briefly so initial sample streams live from t=0.0s
+  await connectPowerWebSocket({ waitOpenMs: 450 });
   await loadSystemStatus();
+  await loadLiveSensorBadge();
+  await loadSessionHistory();
   await loadCuratedSamples();
-  startRealtimeMonitor();
 });
 
-// ── 1. Tab & Dropdown Mode Navigation ───────────────────────────────────────
+// ── 1. Tab & Dropdown Mode Navigation ────────────────────────────────────────
 function setupNavigation() {
   const tabs = document.querySelectorAll(".nav-tab");
   tabs.forEach((tab) => {
@@ -104,17 +141,35 @@ function setupNavigation() {
 
   const btnGoPower = getEl("btnGoPower");
   if (btnGoPower) btnGoPower.addEventListener("click", () => switchView("view-power"));
+
+  const btnMiniToPower = getEl("btnMiniToPower");
+  if (btnMiniToPower) btnMiniToPower.addEventListener("click", () => switchView("view-power"));
+
+  const btnToggleMiniChart = getEl("btnToggleMiniChart");
+  if (btnToggleMiniChart) {
+    btnToggleMiniChart.addEventListener("click", () => {
+      setMiniStripCollapsed(!state.miniCollapsed);
+    });
+  }
+}
+
+function setMiniStripCollapsed(collapsed) {
+  state.miniCollapsed = Boolean(collapsed);
+  setStyle("livePowerStripBody", "display", state.miniCollapsed ? "none" : "block");
+  setTxt("btnToggleMiniChart", state.miniCollapsed ? "Show Waveform" : "Hide");
+  if (!state.miniCollapsed && state.echartsMini) {
+    requestAnimationFrame(() => {
+      state.echartsMini.resize();
+      renderViewedPowerCharts();
+    });
+  }
 }
 
 function switchView(viewId) {
   state.activeView = viewId;
 
   document.querySelectorAll(".nav-tab").forEach((tab) => {
-    if (tab.getAttribute("data-view") === viewId) {
-      tab.classList.add("active");
-    } else {
-      tab.classList.remove("active");
-    }
+    tab.classList.toggle("active", tab.getAttribute("data-view") === viewId);
   });
 
   const modeSelect = getEl("modeSelect");
@@ -123,33 +178,1317 @@ function switchView(viewId) {
   }
 
   document.querySelectorAll(".view").forEach((view) => {
-    if (view.id === viewId) {
-      view.classList.add("active");
-    } else {
-      view.classList.remove("active");
-    }
+    view.classList.toggle("active", view.id === viewId);
   });
 
-  // Re-draw active canvases or views
-  if (viewId === "view-spikes" && state.currentResult) {
-    renderSpectrogram(state.currentResult.spectrogram);
-    drawRateCurve(state.currentResult.spectrogram.per_step_rate);
-  } else if (viewId === "view-power") {
-    drawPowerTraceChart(state.snnPowerHistory, state.yoloPowerHistory);
-    drawLatencyOscilloscope(state.latencyHistory, state.yoloLatencyHistory);
-    drawDynamicEnergyChart(state.currentEnergy);
-  } else if ((viewId === "view-compare" || viewId === "view-recon") && state.currentResult) {
-    applyInferenceResult(state.currentResult);
+  // Hide compact live strip in view-power because view-power hosts the full-size ECharts profiler
+  setStyle("livePowerStrip", "display", viewId === "view-power" ? "none" : "block");
+
+  requestAnimationFrame(() => {
+    if (viewId === "view-power") {
+      if (state.echartsMain) state.echartsMain.resize();
+      renderViewedPowerCharts();
+      drawLatencyOscilloscope(state.latencyHistory, state.yoloLatencyHistory);
+      drawDynamicEnergyChart(state.currentEnergy);
+    } else {
+      if (state.echartsMini && !state.miniCollapsed) state.echartsMini.resize();
+      renderViewedPowerCharts();
+    }
+
+    if (viewId === "view-spikes" && state.currentResult) {
+      renderSpectrogram(state.currentResult.spectrogram);
+      if (state.currentResult.spectrogram?.per_step_rate) {
+        drawRateCurve(state.currentResult.spectrogram.per_step_rate);
+      }
+    } else if ((viewId === "view-compare" || viewId === "view-recon") && state.currentResult) {
+      applyInferenceResult(state.currentResult, { skipSessionMerge: true });
+    }
+  });
+}
+
+// ── 2. Hardware Source & Phase Badge Formatters ──────────────────────────────
+function formatSourceTruth(source, isEstimated, sensorDetail) {
+  const src = String(source || "").trim();
+  const isEst =
+    Boolean(isEstimated) ||
+    !src ||
+    src.toLowerCase().includes("psutil") ||
+    src.toLowerCase().includes("estimated");
+  if (!src) {
+    return {
+      label: "SENSOR: PROBING...",
+      shortLabel: "PROBING...",
+      isEstimated: false,
+      cls: "",
+      detail: sensorDetail || "Probing hardware telemetry source...",
+    };
+  }
+  if (isEst) {
+    return {
+      label: "ESTIMATED: psutil CPU Telemetry",
+      shortLabel: "ESTIMATED: psutil",
+      isEstimated: true,
+      cls: "estimated",
+      detail: sensorDetail || "Estimated from real psutil CPU & memory counters (no direct rail sensor)",
+    };
+  }
+  return {
+    label: `MEASURED: ${src}`,
+    shortLabel: `MEASURED: ${src}`,
+    isEstimated: false,
+    cls: "measured",
+    detail: sensorDetail || `Direct hardware rail telemetry via ${src}`,
+  };
+}
+
+function updateSourceBadges(source, isEstimated, sensorDetail) {
+  if (source) {
+    state.sensorInfo = {
+      source,
+      is_estimated: Boolean(isEstimated),
+      sensor_detail: sensorDetail || "",
+    };
+  }
+  const info = formatSourceTruth(
+    state.sensorInfo.source,
+    state.sensorInfo.is_estimated,
+    state.sensorInfo.sensor_detail
+  );
+
+  const badges = [
+    { wrap: "hwSourceBadge", txt: "hwSourceText" },
+    { wrap: "miniSourceBadge", txt: "miniSourceBadge" },
+    { wrap: "mainSourceBadge", txt: "mainSourceBadge" },
+    { wrap: "powerViewSourceBadge", txt: "powerViewSourceBadge" },
+  ];
+  badges.forEach(({ wrap, txt }) => {
+    const wrapEl = getEl(wrap);
+    if (wrapEl) {
+      wrapEl.classList.remove("measured", "estimated");
+      if (info.cls) wrapEl.classList.add(info.cls);
+      wrapEl.title = info.detail;
+    }
+    setTxt(txt, info.label);
+  });
+
+  if (state.sensorInfo.sensor_detail) {
+    setTxt("pwrSensorFooter", `${info.shortLabel} (${state.sensorInfo.sensor_detail})`);
+  } else {
+    setTxt("pwrSensorFooter", info.label);
   }
 }
 
-// ── 2. System Status & Samples Loading ───────────────────────────────────────
+function updatePhaseBadges(phaseKey) {
+  const cfg = PHASE_LABELS[phaseKey] || { text: String(phaseKey || "STANDBY").toUpperCase(), cls: "idle" };
+  ["miniPhaseBadge", "mainPhaseBadge", "powerViewPhaseBadge"].forEach((id) => {
+    const el = getEl(id);
+    if (el) {
+      el.className = `phase-badge ${cfg.cls}`;
+      el.textContent = cfg.text;
+    }
+  });
+}
+
+function updateWsBadge(statusClass, text) {
+  const badge = getEl("wsLinkBadge");
+  if (badge) {
+    badge.classList.remove("connected", "connecting", "disconnected");
+    badge.classList.add(statusClass);
+  }
+  setTxt("wsLinkText", text);
+}
+
+// ── 3. WebSocket Client (/ws/power) ──────────────────────────────────────────
+function connectPowerWebSocket(options = {}) {
+  const waitOpenMs = Number(options.waitOpenMs || 0);
+  if (
+    state.ws &&
+    (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)
+  ) {
+    return Promise.resolve(state.ws.readyState === WebSocket.OPEN);
+  }
+
+  if (state.wsReconnectTimer) {
+    clearTimeout(state.wsReconnectTimer);
+    state.wsReconnectTimer = null;
+  }
+
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${proto}//${window.location.host}/ws/power`;
+  updateWsBadge("connecting", "WS: CONNECTING");
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let openWaitTimer = null;
+    const finishWait = (ok) => {
+      if (settled) return;
+      settled = true;
+      if (openWaitTimer) clearTimeout(openWaitTimer);
+      resolve(ok);
+    };
+
+    if (waitOpenMs > 0) {
+      openWaitTimer = setTimeout(() => finishWait(false), waitOpenMs);
+    } else {
+      finishWait(false);
+    }
+
+    let ws;
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch (err) {
+      console.warn("WebSocket initialization failed:", err);
+      updateWsBadge("disconnected", "WS: UNAVAILABLE");
+      scheduleWsReconnect();
+      finishWait(false);
+      return;
+    }
+
+    state.ws = ws;
+
+    ws.onopen = () => {
+      state.wsConnected = true;
+      state.wsReconnectDelayMs = 500;
+      updateWsBadge("connected", "WS: LIVE");
+      finishWait(true);
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        handleWsMessage(msg);
+      } catch (err) {
+        console.warn("Invalid WebSocket payload:", err);
+      }
+    };
+
+    ws.onerror = () => {
+      state.wsConnected = false;
+      updateWsBadge("disconnected", "WS: RECONNECTING");
+    };
+
+    ws.onclose = () => {
+      state.wsConnected = false;
+      if (state.ws === ws) {
+        state.ws = null;
+      }
+      updateWsBadge("disconnected", "WS: RECONNECTING");
+      finishWait(false);
+      scheduleWsReconnect();
+    };
+  });
+}
+
+function scheduleWsReconnect() {
+  if (state.wsReconnectTimer) return;
+  const delay = state.wsReconnectDelayMs;
+  state.wsReconnectDelayMs = Math.min(5000, Math.round(state.wsReconnectDelayMs * 1.6));
+  state.wsReconnectTimer = setTimeout(() => {
+    state.wsReconnectTimer = null;
+    connectPowerWebSocket();
+  }, delay);
+}
+
+function handleWsMessage(msg) {
+  if (!msg || !msg.type) return;
+
+  switch (msg.type) {
+    case "hello": {
+      const caps = msg.capabilities || {};
+      const latest = msg.latest || {};
+      const src = msg.source || caps.source || latest.source;
+      const isEst =
+        msg.is_estimated !== undefined
+          ? msg.is_estimated
+          : caps.is_estimated !== undefined
+            ? caps.is_estimated
+            : latest.is_estimated;
+      const detail = msg.sensor_detail || caps.sensor_detail || latest.sensor_detail;
+      if (src) {
+        updateSourceBadges(src, isEst, detail);
+      }
+      if (Number.isFinite(Number(latest.watts))) {
+        setStyle("sysPowerStatus", "display", "inline");
+        setTxt("globalSnnPower", `${Number(latest.watts).toFixed(2)} W`);
+        setTxt("miniLiveWatts", `${Number(latest.watts).toFixed(2)} W`);
+        setTxt("liveRailNowVal", `${Number(latest.watts).toFixed(2)} W`);
+      }
+      const act =
+        msg.active_session ||
+        (msg.active_session_id
+          ? {
+              session_id: msg.active_session_id,
+              image_name: msg.image_name,
+              started_at_utc: msg.started_at_utc,
+            }
+          : null);
+      if (act && act.session_id && !state.sessionMap[act.session_id]) {
+        ensureSessionRecord(act.session_id, {
+          session_id: act.session_id,
+          image_name: act.image_name || "Active Benchmark",
+          started_at_utc: act.started_at_utc || new Date().toISOString(),
+          source: src,
+          is_estimated: isEst,
+          sensor_detail: detail,
+          active: true,
+        });
+      }
+      break;
+    }
+
+    case "session_start":
+      onWsSessionStart(msg);
+      break;
+
+    case "phase_change":
+      onWsPhaseChange(msg);
+      break;
+
+    case "power_sample":
+      onWsPowerSample(msg);
+      break;
+
+    case "session_complete":
+      onWsSessionComplete(msg);
+      break;
+
+    case "error":
+      onWsError(msg);
+      break;
+
+    default:
+      break;
+  }
+}
+
+function ensureSessionRecord(sessionId, meta = {}) {
+  if (!sessionId) return null;
+  let rec = state.sessionMap[sessionId];
+  if (!rec) {
+    rec = {
+      summary: {
+        session_id: sessionId,
+        image_name: meta.image_name || "Image Benchmark",
+        started_at_utc: meta.started_at_utc || new Date().toISOString(),
+        completed_at_utc: meta.completed_at_utc || null,
+        duration_s: meta.duration_s || 0,
+        source: meta.source || state.sensorInfo.source,
+        is_estimated:
+          meta.is_estimated !== undefined ? meta.is_estimated : state.sensorInfo.is_estimated,
+        sensor_detail: meta.sensor_detail || state.sensorInfo.sensor_detail,
+        sample_count: meta.sample_count || 0,
+        phases: meta.phases || {},
+        comparison: meta.comparison || {},
+      },
+      samples: [],
+      sampleKeys: new Set(),
+      active: Boolean(meta.active),
+      currentPhase: meta.currentPhase || "idle_baseline",
+    };
+    state.sessionMap[sessionId] = rec;
+    upsertSessionSummary(rec.summary);
+  } else if (meta && Object.keys(meta).length > 0) {
+    rec.summary = {
+      ...rec.summary,
+      ...meta,
+      phases: meta.phases ? { ...rec.summary.phases, ...meta.phases } : rec.summary.phases,
+      comparison: meta.comparison
+        ? { ...rec.summary.comparison, ...meta.comparison }
+        : rec.summary.comparison,
+    };
+    upsertSessionSummary(rec.summary);
+  }
+  return rec;
+}
+
+function upsertSessionSummary(summary) {
+  if (!summary || !summary.session_id) return;
+  const idx = state.sessions.findIndex((s) => s.session_id === summary.session_id);
+  if (idx >= 0) {
+    state.sessions[idx] = { ...state.sessions[idx], ...summary };
+  } else {
+    state.sessions.unshift(summary);
+  }
+  if (state.sessions.length > 50) {
+    state.sessions = state.sessions.slice(0, 50);
+  }
+}
+
+function onWsSessionStart(msg) {
+  const sid = msg.session_id;
+  if (!sid) return;
+
+  // Preserve all earlier sessions; create a fresh active session entry
+  const rec = ensureSessionRecord(sid, {
+    session_id: sid,
+    image_name: msg.image_name || "Uploaded Frame",
+    started_at_utc: msg.started_at_utc || new Date().toISOString(),
+    source: msg.source,
+    is_estimated: msg.is_estimated,
+    sensor_detail: msg.sensor_detail,
+    active: true,
+    phases: {},
+    comparison: {},
+  });
+  rec.samples = [];
+  rec.sampleKeys = new Set();
+  rec.active = true;
+  rec.currentPhase = "idle_baseline";
+
+  state.activeSessionId = sid;
+  state.viewedSessionId = sid;
+
+  if (msg.source) {
+    updateSourceBadges(msg.source, msg.is_estimated, msg.sensor_detail);
+  }
+  updatePhaseBadges("idle_baseline");
+
+  // Auto-expand mini live chart if user collapsed it so live benchmark is visible on upload
+  if (state.miniCollapsed && state.activeView !== "view-power") {
+    setMiniStripCollapsed(false);
+  }
+
+  setTxt("miniSessionName", rec.summary.image_name);
+  setTxt("miniSnnAvgW", "-- W");
+  setTxt("miniYoloAvgW", "-- W");
+  setTxt("miniLiveWatts", "-- W");
+  setTxt("liveSnnPwrVal", "-- W");
+  setTxt("liveYoloPwrVal", "-- W");
+  setTxt("liveSnnPeakVal", "-- W");
+  setTxt("liveYoloPeakVal", "-- W");
+  setTxt("liveSnnEnergyVal", "-- mJ");
+  setTxt("liveYoloEnergyVal", "-- mJ");
+  setTxt("livePwrRatioVal", "--×");
+  setTxt("livePwrAdv", "Benchmark Running...");
+  setTxt("liveEnergySavingsVal", "--% energy saved");
+  setTxt("pwrRatioBadge", "Capturing Baseline...");
+
+  renderSessionControls();
+  renderViewedPowerCharts({ resetChart: true });
+}
+
+function onWsPhaseChange(msg) {
+  const sid = msg.session_id || state.activeSessionId;
+  const rec = ensureSessionRecord(sid);
+  if (rec) {
+    rec.currentPhase = msg.phase;
+  }
+  if (state.viewedSessionId === sid || state.activeSessionId === sid) {
+    updatePhaseBadges(msg.phase);
+    if (msg.phase === "snn_inference") {
+      setTxt("pwrRatioBadge", "Measuring SNN Active Power...");
+    } else if (msg.phase === "yolo_inference") {
+      setTxt("pwrRatioBadge", "Measuring YOLOv8 Active Power...");
+    } else if (msg.phase === "cooldown") {
+      setTxt("pwrRatioBadge", "Inter-Model Cooldown...");
+    }
+  }
+}
+
+function ingestSampleIntoSession(rec, sample) {
+  if (!rec || !sample || sample.watts === undefined || sample.watts === null) return false;
+  const key =
+    sample.seq !== undefined && sample.seq !== null
+      ? `seq:${sample.seq}`
+      : `t:${sample.elapsed_s}:${sample.phase}`;
+  if (rec.sampleKeys.has(key)) return false;
+  rec.sampleKeys.add(key);
+  rec.samples.push(sample);
+  rec.samples.sort((a, b) => (a.elapsed_s || 0) - (b.elapsed_s || 0));
+  rec.summary.sample_count = rec.samples.length;
+  return true;
+}
+
+function computePhaseLiveStats(samples, phaseName) {
+  const pts = (samples || []).filter((s) => s.phase === phaseName && Number.isFinite(Number(s.watts)));
+  if (pts.length === 0) return null;
+  let sum = 0;
+  let peak = -Infinity;
+  for (const p of pts) {
+    const w = Number(p.watts);
+    sum += w;
+    if (w > peak) peak = w;
+  }
+  return {
+    avg: sum / pts.length,
+    peak,
+    latest: Number(pts[pts.length - 1].watts),
+    count: pts.length,
+  };
+}
+
+function onWsPowerSample(msg) {
+  const sid = msg.session_id || state.activeSessionId;
+  if (!sid) return;
+  const rec = ensureSessionRecord(sid, {
+    source: msg.source,
+    is_estimated: msg.is_estimated,
+    sensor_detail: msg.sensor_detail,
+  });
+  if (!rec) return;
+
+  ingestSampleIntoSession(rec, msg);
+  if (msg.phase) rec.currentPhase = msg.phase;
+  if (msg.source) {
+    updateSourceBadges(msg.source, msg.is_estimated, msg.sensor_detail);
+  }
+
+  // Update instantaneous hardware rail readouts
+  const watts = Number(msg.watts);
+  if (Number.isFinite(watts)) {
+    setStyle("sysPowerStatus", "display", "inline");
+    setTxt("globalSnnPower", `${watts.toFixed(2)} W`);
+    setTxt("miniLiveWatts", `${watts.toFixed(2)} W`);
+    setTxt("liveRailNowVal", `${watts.toFixed(2)} W`);
+  }
+
+  const cpuStr = msg.cpu_pct !== null && msg.cpu_pct !== undefined ? `${Number(msg.cpu_pct).toFixed(0)}%` : "--%";
+  const gpuStr =
+    msg.gpu_util_pct !== null && msg.gpu_util_pct !== undefined
+      ? `${Number(msg.gpu_util_pct).toFixed(0)}%`
+      : "N/A";
+  setTxt("liveCpuGpuVal", `CPU: ${cpuStr} | GPU: ${gpuStr}`);
+
+  // If currently viewing this session, update live SNN/YOLO metrics & ECharts incrementally
+  if (state.viewedSessionId === sid) {
+    updatePhaseBadges(msg.phase || rec.currentPhase);
+    updateSessionReadouts(rec);
+    renderViewedPowerCharts();
+  }
+}
+
+function onWsSessionComplete(msg) {
+  const sid = msg.session_id;
+  const summary = msg.summary || {};
+  const rec = ensureSessionRecord(sid, summary);
+  if (rec) {
+    rec.active = false;
+    rec.currentPhase = "complete";
+    rec.summary = { ...rec.summary, ...summary };
+    upsertSessionSummary(rec.summary);
+  }
+
+  if (state.activeSessionId === sid) {
+    state.activeSessionId = null;
+  }
+
+  if (state.viewedSessionId === sid && rec) {
+    updatePhaseBadges("complete");
+    updateSessionReadouts(rec);
+    renderViewedPowerCharts();
+  }
+
+  const snnAvg = summary.phases?.snn_inference?.avg_watts;
+  const yoloAvg = summary.phases?.yolo_inference?.avg_watts;
+  if (Number.isFinite(snnAvg)) state.latestMeasuredSnnW = snnAvg;
+  if (Number.isFinite(yoloAvg)) state.latestMeasuredYoloW = yoloAvg;
+  updateBatteryAutonomy(state.batteryCapacityMah);
+
+  renderSessionControls();
+  rebuildLatencyHistoryFromSessions();
+  // Sync exact persisted session store from backend
+  loadSessionHistory();
+}
+
+function onWsError(msg) {
+  console.error("WebSocket benchmark error:", msg);
+  updatePhaseBadges("error");
+  setTxt("mainChartMeta", `Benchmark Error: ${msg.message || "Unknown error"}`);
+}
+
+function formatEnergyValue(mjVal) {
+  const mj = Number(mjVal);
+  if (!Number.isFinite(mj)) return "-- mJ";
+  if (mj >= 1000) return `${(mj / 1000).toFixed(2)} J`;
+  return `${mj.toFixed(1)} mJ`;
+}
+
+function updateSessionReadouts(rec) {
+  if (!rec) return;
+  const sum = rec.summary || {};
+  const phases = sum.phases || {};
+  const cmp = sum.comparison || {};
+
+  setTxt("miniSessionName", sum.image_name || rec.summary.session_id);
+  setTxt(
+    "mainChartMeta",
+    `${sum.image_name || "Benchmark"} · ${sum.session_id} · ${rec.samples.length} hardware samples`
+  );
+
+  if (sum.source) {
+    updateSourceBadges(sum.source, sum.is_estimated, sum.sensor_detail);
+  }
+
+  // Prefer finalized phase metrics, fall back to live running sample averages during execution
+  const liveSnn = computePhaseLiveStats(rec.samples, "snn_inference");
+  const liveYolo = computePhaseLiveStats(rec.samples, "yolo_inference");
+
+  const snnAvg = phases.snn_inference?.avg_watts ?? liveSnn?.avg ?? null;
+  const snnPeak = phases.snn_inference?.peak_watts ?? liveSnn?.peak ?? null;
+  const snnTotalMj = phases.snn_inference?.total_energy_mj ?? null;
+  const snnInfMj = phases.snn_inference?.energy_per_inference_mj ?? null;
+
+  const yoloAvg = phases.yolo_inference?.avg_watts ?? liveYolo?.avg ?? null;
+  const yoloPeak = phases.yolo_inference?.peak_watts ?? liveYolo?.peak ?? null;
+  const yoloTotalMj = phases.yolo_inference?.total_energy_mj ?? null;
+  const yoloInfMj = phases.yolo_inference?.energy_per_inference_mj ?? null;
+
+  if (Number.isFinite(snnAvg)) {
+    state.latestMeasuredSnnW = snnAvg;
+    const snnTxt = `${snnAvg.toFixed(2)} W`;
+    setTxt("miniSnnAvgW", snnTxt);
+    setTxt("liveSnnPwrVal", snnTxt);
+    setTxt("pwrSnn", snnTxt);
+    setTxt("reconPower", snnTxt);
+    setTxt("snnCardPower", snnTxt);
+    setStyle("snnCardPowerPill", "display", "inline-flex");
+    setTxt("cmpSnnPower", snnTxt);
+    setTxt("hdrSnnPower", `${snnAvg.toFixed(2)}W`);
+  } else {
+    setTxt("miniSnnAvgW", "-- W");
+    setTxt("liveSnnPwrVal", "-- W");
+    setTxt("pwrSnn", "-- W");
+  }
+
+  if (Number.isFinite(yoloAvg)) {
+    state.latestMeasuredYoloW = yoloAvg;
+    const yoloTxt = `${yoloAvg.toFixed(2)} W`;
+    setTxt("miniYoloAvgW", yoloTxt);
+    setTxt("liveYoloPwrVal", yoloTxt);
+    setTxt("pwrAnn", yoloTxt);
+    setTxt("cmpYoloPower", yoloTxt);
+    setTxt("hdrYoloPower", `${yoloAvg.toFixed(2)}W`);
+  } else {
+    setTxt("miniYoloAvgW", "-- W");
+    setTxt("liveYoloPwrVal", "-- W");
+    setTxt("pwrAnn", "-- W");
+  }
+
+  setTxt("liveSnnPeakVal", Number.isFinite(snnPeak) ? `${snnPeak.toFixed(2)} W` : "-- W");
+  setTxt("liveYoloPeakVal", Number.isFinite(yoloPeak) ? `${yoloPeak.toFixed(2)} W` : "-- W");
+  setTxt(
+    "liveSnnEnergyVal",
+    Number.isFinite(snnInfMj)
+      ? `${formatEnergyValue(snnInfMj)}/inf`
+      : Number.isFinite(snnTotalMj)
+        ? formatEnergyValue(snnTotalMj)
+        : "-- mJ"
+  );
+  setTxt(
+    "liveYoloEnergyVal",
+    Number.isFinite(yoloInfMj)
+      ? `${formatEnergyValue(yoloInfMj)}/inf`
+      : Number.isFinite(yoloTotalMj)
+        ? formatEnergyValue(yoloTotalMj)
+        : "-- mJ"
+  );
+
+  // Update proportional System Power Consumption bars dynamically for any platform (1W Jetson .. 45W GPU)
+  const scaleMax = Math.max(5.0, (snnAvg || 0) * 1.15, (yoloAvg || 0) * 1.15);
+  const snnPct = Number.isFinite(snnAvg) ? Math.max(4, Math.min(100, (snnAvg / scaleMax) * 100)) : 0;
+  const annPct = Number.isFinite(yoloAvg) ? Math.max(4, Math.min(100, (yoloAvg / scaleMax) * 100)) : 0;
+  setStyle("pwrSnnBar", "width", `${snnPct.toFixed(1)}%`);
+  setStyle("pwrAnnBar", "width", `${annPct.toFixed(1)}%`);
+
+  const ratio =
+    cmp.power_ratio_yolo_over_snn ??
+    (Number.isFinite(snnAvg) && Number.isFinite(yoloAvg) && snnAvg > 0 ? yoloAvg / snnAvg : null);
+  const eSav = cmp.energy_savings_pct;
+  if (Number.isFinite(ratio)) {
+    setTxt("livePwrRatioVal", `${Number(ratio).toFixed(2)}×`);
+    setTxt("livePwrAdv", `${Number(ratio).toFixed(2)}× Lower Draw`);
+    setTxt("pwrRatioBadge", `${Number(ratio).toFixed(2)}× Power Efficiency`);
+  } else {
+    setTxt("livePwrRatioVal", "--×");
+    setTxt("livePwrAdv", rec.active ? "Sampling..." : "Awaiting Trace");
+  }
+
+  setTxt(
+    "liveEnergySavingsVal",
+    Number.isFinite(eSav) ? `${Number(eSav).toFixed(1)}% energy saved` : "--% energy saved"
+  );
+
+  const lastSample = rec.samples.length > 0 ? rec.samples[rec.samples.length - 1] : null;
+  if (lastSample && Number.isFinite(Number(lastSample.watts))) {
+    setTxt("miniLiveWatts", `${Number(lastSample.watts).toFixed(2)} W`);
+    setTxt("liveRailNowVal", `${Number(lastSample.watts).toFixed(2)} W`);
+    const cpuStr =
+      lastSample.cpu_pct !== null && lastSample.cpu_pct !== undefined
+        ? `${Number(lastSample.cpu_pct).toFixed(0)}%`
+        : "--%";
+    const gpuStr =
+      lastSample.gpu_util_pct !== null && lastSample.gpu_util_pct !== undefined
+        ? `${Number(lastSample.gpu_util_pct).toFixed(0)}%`
+        : "N/A";
+    setTxt("liveCpuGpuVal", `CPU: ${cpuStr} | GPU: ${gpuStr}`);
+  }
+}
+
+// ── 4. Apache ECharts Initialization, Data Mapping & Offline Fallback ────────
+function initPowerCharts() {
+  const echartsOk =
+    typeof window.echarts === "object" && typeof window.echarts.init === "function";
+  state.echartsAvailable = echartsOk;
+
+  if (echartsOk) {
+    setStyle("echartsFallbackBanner", "display", "none");
+    setStyle("echartsMiniFallbackBanner", "display", "none");
+    setStyle("echartsPowerMain", "display", "block");
+    setStyle("echartsPowerMini", "display", "block");
+    setStyle("powerTraceCanvas", "display", "none");
+    setStyle("miniPowerFallbackCanvas", "display", "none");
+
+    const mainEl = getEl("echartsPowerMain");
+    const miniEl = getEl("echartsPowerMini");
+    if (mainEl && !state.echartsMain) {
+      state.echartsMain = window.echarts.init(mainEl, null, { renderer: "canvas" });
+    }
+    if (miniEl && !state.echartsMini) {
+      state.echartsMini = window.echarts.init(miniEl, null, { renderer: "canvas" });
+    }
+
+    window.addEventListener("resize", () => {
+      if (state.echartsMain && state.activeView === "view-power") {
+        state.echartsMain.resize();
+      }
+      if (state.echartsMini && state.activeView !== "view-power" && !state.miniCollapsed) {
+        state.echartsMini.resize();
+      }
+    });
+  } else {
+    console.warn("Apache ECharts CDN unavailable; activating HTML5 Canvas fallback.");
+    setStyle("echartsFallbackBanner", "display", "block");
+    setStyle("echartsMiniFallbackBanner", "display", "block");
+    setStyle("echartsPowerMain", "display", "none");
+    setStyle("echartsPowerMini", "display", "none");
+    setStyle("powerTraceCanvas", "display", "block");
+    setStyle("miniPowerFallbackCanvas", "display", "block");
+  }
+
+  renderViewedPowerCharts({ resetChart: true });
+}
+
+function buildPhaseSeriesData(samples) {
+  const baselineData = [];
+  const snnData = [];
+  const yoloData = [];
+  let snnMinT = null;
+  let snnMaxT = null;
+  let yoloMinT = null;
+  let yoloMaxT = null;
+
+  const sorted = [...(samples || [])].sort((a, b) => (a.elapsed_s || 0) - (b.elapsed_s || 0));
+  let prevPt = null;
+  let prevGroup = null;
+
+  const toPoint = (s) => [
+    Number(Number(s.elapsed_s || 0).toFixed(3)),
+    Number(Number(s.watts || 0).toFixed(3)),
+    s.phase || "idle_baseline",
+    s.cpu_pct ?? null,
+    s.gpu_util_pct ?? null,
+    s.mem_pct ?? null,
+    s.source || "",
+    Boolean(s.is_estimated),
+  ];
+
+  const getGroup = (phase) => {
+    if (phase === "snn_inference") return "snn";
+    if (phase === "yolo_inference") return "yolo";
+    return "base";
+  };
+
+  for (const s of sorted) {
+    const pt = toPoint(s);
+    const t = pt[0];
+    const grp = getGroup(s.phase);
+
+    if (grp !== prevGroup && prevPt !== null) {
+      // Break previous series if returning to baseline later so distant baseline segments do not connect
+      if (prevGroup === "base") {
+        baselineData.push(null);
+      } else if (prevGroup === "snn") {
+        snnData.push(null);
+      } else if (prevGroup === "yolo") {
+        yoloData.push(null);
+      }
+
+      // Bridge seamlessly from the previous point into the newly entered series
+      if (grp === "snn") {
+        snnData.push(prevPt);
+      } else if (grp === "yolo") {
+        yoloData.push(prevPt);
+      } else {
+        baselineData.push(prevPt);
+      }
+    }
+
+    if (grp === "snn") {
+      snnData.push(pt);
+      if (snnMinT === null || t < snnMinT) snnMinT = t;
+      if (snnMaxT === null || t > snnMaxT) snnMaxT = t;
+    } else if (grp === "yolo") {
+      yoloData.push(pt);
+      if (yoloMinT === null || t < yoloMinT) yoloMinT = t;
+      if (yoloMaxT === null || t > yoloMaxT) yoloMaxT = t;
+    } else {
+      baselineData.push(pt);
+    }
+
+    prevPt = pt;
+    prevGroup = grp;
+  }
+
+  const snnMarkAreas =
+    snnMinT !== null && snnMaxT !== null && snnMaxT > snnMinT
+      ? [[{ name: "SNN", xAxis: snnMinT }, { xAxis: snnMaxT }]]
+      : [];
+  const yoloMarkAreas =
+    yoloMinT !== null && yoloMaxT !== null && yoloMaxT > yoloMinT
+      ? [[{ name: "YOLOv8", xAxis: yoloMinT }, { xAxis: yoloMaxT }]]
+      : [];
+
+  return { baselineData, snnData, yoloData, snnMarkAreas, yoloMarkAreas, sorted };
+}
+
+function buildEChartsOption(session, compact) {
+  const { baselineData, snnData, yoloData, snnMarkAreas, yoloMarkAreas, sorted } =
+    buildPhaseSeriesData(session?.samples || []);
+  const hasSamples = sorted.length > 0;
+
+  const makeGrad = (r, g, b, topA, botA) => {
+    if (window.echarts?.graphic?.LinearGradient) {
+      return new window.echarts.graphic.LinearGradient(0, 0, 0, 1, [
+        { offset: 0, color: `rgba(${r}, ${g}, ${b}, ${topA})` },
+        { offset: 1, color: `rgba(${r}, ${g}, ${b}, ${botA})` },
+      ]);
+    }
+    return `rgba(${r}, ${g}, ${b}, 0.16)`;
+  };
+
+  return {
+    backgroundColor: "transparent",
+    animation: true,
+    animationDuration: 140,
+    animationDurationUpdate: 80,
+    animationEasingUpdate: "linear",
+    grid: compact
+      ? { top: 28, right: 16, bottom: 24, left: 52 }
+      : { top: 44, right: 24, bottom: 42, left: 60 },
+    legend: {
+      top: compact ? 2 : 8,
+      right: 12,
+      textStyle: { color: "#9fb0c7", fontSize: compact ? 10 : 11, fontFamily: "monospace" },
+      itemWidth: 16,
+      itemHeight: 8,
+      data: ["Baseline / Gap", "NeuroCamo SNN", "YOLOv8-Nano"],
+    },
+    tooltip: {
+      trigger: "axis",
+      axisPointer: {
+        type: "line",
+        lineStyle: { color: "rgba(0, 210, 255, 0.55)", width: 1, type: "dashed" },
+      },
+      backgroundColor: "rgba(10, 14, 22, 0.96)",
+      borderColor: "#2d384e",
+      borderWidth: 1,
+      textStyle: { color: "#e8ecf5", fontSize: 11, fontFamily: "monospace" },
+      formatter: (params) => {
+        if (!Array.isArray(params) || params.length === 0) return "";
+        const valid = params.find((p) => Array.isArray(p.data) && p.data.length >= 2);
+        if (!valid) return "";
+        const [t, w, phase, cpu, gpu, mem, src, isEst] = valid.data;
+        const pInfo = PHASE_LABELS[phase] || { text: phase || "UNKNOWN" };
+        const truth = isEst ? `ESTIMATED (${src || "psutil"})` : `MEASURED (${src || "HW"})`;
+        const cpuTxt = cpu !== null && cpu !== undefined ? `${Number(cpu).toFixed(1)}%` : "--";
+        const gpuTxt = gpu !== null && gpu !== undefined ? `${Number(gpu).toFixed(1)}%` : "N/A";
+        const memTxt = mem !== null && mem !== undefined ? `${Number(mem).toFixed(1)}%` : "--";
+        return [
+          `<div><strong>Time:</strong> ${Number(t).toFixed(2)}s</div>`,
+          `<div><strong>Phase:</strong> ${escapeHtml(pInfo.text)}</div>`,
+          `<div><strong>Power:</strong> <span style="color:#00e5a0;font-weight:700">${Number(w).toFixed(2)} W</span></div>`,
+          `<div><strong>CPU / GPU:</strong> ${cpuTxt} / ${gpuTxt} (RAM ${memTxt})</div>`,
+          `<div><strong>Source:</strong> ${escapeHtml(truth)}</div>`,
+        ].join("");
+      },
+    },
+    xAxis: {
+      type: "value",
+      name: compact ? "" : "Time (s)",
+      nameLocation: "middle",
+      nameGap: 25,
+      nameTextStyle: { color: "#7b889e", fontSize: 11, fontFamily: "monospace" },
+      min: 0,
+      max: (val) =>
+        val.max !== null && val.max !== undefined && isFinite(val.max)
+          ? Number(Math.max(1.0, val.max + 0.15).toFixed(2))
+          : 1.0,
+      axisLine: { lineStyle: { color: "#2d384e" } },
+      axisLabel: {
+        color: "#7b889e",
+        fontSize: 10,
+        fontFamily: "monospace",
+        formatter: (v) => `${Number(v).toFixed(1)}s`,
+      },
+      splitLine: { lineStyle: { color: "rgba(45, 56, 78, 0.4)", type: "dashed" } },
+    },
+    yAxis: {
+      type: "value",
+      name: compact ? "W" : "Power (W)",
+      nameTextStyle: { color: "#7b889e", fontSize: 11, fontFamily: "monospace" },
+      scale: true,
+      min: (val) => {
+        if (val.min === null || val.min === undefined || !isFinite(val.min)) return 0;
+        const span = Math.max(0.25, (val.max || val.min) - val.min);
+        return Math.max(0, Number((val.min - span * 0.18).toFixed(2)));
+      },
+      max: (val) => {
+        if (val.max === null || val.max === undefined || !isFinite(val.max)) return 5;
+        const span = Math.max(0.4, val.max - (val.min || 0));
+        return Number((val.max + span * 0.22).toFixed(2));
+      },
+      axisLine: { lineStyle: { color: "#2d384e" } },
+      axisLabel: {
+        color: "#7b889e",
+        fontSize: 10,
+        fontFamily: "monospace",
+        formatter: (v) => `${Number(v).toFixed(1)}W`,
+      },
+      splitLine: { lineStyle: { color: "rgba(45, 56, 78, 0.4)", type: "dashed" } },
+    },
+    graphic: hasSamples
+      ? []
+      : [
+          {
+            type: "text",
+            left: "center",
+            top: "middle",
+            style: {
+              text: "Awaiting live WebSocket power telemetry...",
+              fill: "#7b889e",
+              font: "12px monospace",
+            },
+          },
+        ],
+    series: [
+      {
+        name: "Baseline / Gap",
+        type: "line",
+        color: "#64748b",
+        lineStyle: { width: 1.8, type: "dashed", color: "#64748b" },
+        itemStyle: { color: "#64748b" },
+        showSymbol: false,
+        connectNulls: false,
+        data: baselineData,
+      },
+      {
+        name: "NeuroCamo SNN",
+        type: "line",
+        color: "#00e5a0",
+        lineStyle: { width: 2.5, color: "#00e5a0" },
+        itemStyle: { color: "#00e5a0" },
+        symbol: "circle",
+        symbolSize: compact ? 4 : 5,
+        showSymbol: snnData.length <= 45,
+        connectNulls: false,
+        areaStyle: { color: makeGrad(0, 229, 160, 0.28, 0.02) },
+        markArea: {
+          silent: true,
+          label: {
+            show: true,
+            position: "insideTop",
+            color: "#00e5a0",
+            fontSize: 10,
+            fontFamily: "monospace",
+          },
+          itemStyle: {
+            color: "rgba(0, 229, 160, 0.07)",
+            borderColor: "rgba(0, 229, 160, 0.28)",
+            borderWidth: 1,
+          },
+          data: snnMarkAreas,
+        },
+        data: snnData,
+      },
+      {
+        name: "YOLOv8-Nano",
+        type: "line",
+        color: "#ff4455",
+        lineStyle: { width: 2.5, color: "#ff4455" },
+        itemStyle: { color: "#ff4455" },
+        symbol: "circle",
+        symbolSize: compact ? 4 : 5,
+        showSymbol: yoloData.length <= 45,
+        connectNulls: false,
+        areaStyle: { color: makeGrad(255, 68, 85, 0.24, 0.02) },
+        markArea: {
+          silent: true,
+          label: {
+            show: true,
+            position: "insideTop",
+            color: "#ff4455",
+            fontSize: 10,
+            fontFamily: "monospace",
+          },
+          itemStyle: {
+            color: "rgba(255, 68, 85, 0.07)",
+            borderColor: "rgba(255, 68, 85, 0.28)",
+            borderWidth: 1,
+          },
+          data: yoloMarkAreas,
+        },
+        data: yoloData,
+      },
+    ],
+  };
+}
+
+function renderViewedPowerCharts(opts = {}) {
+  const session = state.viewedSessionId ? state.sessionMap[state.viewedSessionId] : null;
+  const reset = Boolean(opts.resetChart);
+
+  if (state.echartsAvailable) {
+    if (state.echartsMain && state.activeView === "view-power") {
+      state.echartsMain.setOption(buildEChartsOption(session, false), reset);
+    }
+    if (state.echartsMini && state.activeView !== "view-power" && !state.miniCollapsed) {
+      state.echartsMini.setOption(buildEChartsOption(session, true), reset);
+    }
+  } else {
+    drawCanvasPowerTrace("powerTraceCanvas", session, false);
+    drawCanvasPowerTrace("miniPowerFallbackCanvas", session, true);
+  }
+
+  // Always keep compact sparkline canvases updated with real samples (never fake waves)
+  drawCanvasPowerTrace("reconPowerCanvas", session, true);
+  drawCanvasPowerTrace("sysPowerCardCanvas", session, true);
+}
+
+function drawCanvasPowerTrace(canvasId, session, compact) {
+  const canvas = getEl(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#06090e";
+  ctx.fillRect(0, 0, w, h);
+
+  const samples = [...(session?.samples || [])].sort(
+    (a, b) => (a.elapsed_s || 0) - (b.elapsed_s || 0)
+  );
+  if (samples.length === 0) {
+    ctx.fillStyle = "#7b889e";
+    ctx.font = compact ? "10px monospace" : "12px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("Awaiting live hardware telemetry...", w / 2, h / 2 + 4);
+    ctx.textAlign = "left";
+    return;
+  }
+
+  const padL = compact ? 6 : 50;
+  const padR = compact ? 6 : 16;
+  const padT = compact ? 5 : 22;
+  const padB = compact ? 5 : 26;
+  const drawW = Math.max(10, w - padL - padR);
+  const drawH = Math.max(10, h - padT - padB);
+
+  // Subtle grid
+  ctx.strokeStyle = "rgba(0, 210, 255, 0.08)";
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= 3; i++) {
+    const gy = padT + (drawH / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(padL, gy);
+    ctx.lineTo(padL + drawW, gy);
+    ctx.stroke();
+  }
+
+  const wattsVals = samples.map((s) => Number(s.watts || 0));
+  const rawMin = Math.min(...wattsVals);
+  const rawMax = Math.max(...wattsVals);
+  const spanW = Math.max(0.4, rawMax - rawMin);
+  const minW = Math.max(0, rawMin - spanW * 0.18);
+  const maxW = rawMax + spanW * 0.22;
+  const maxT = Math.max(1.0, ...samples.map((s) => Number(s.elapsed_s || 0)));
+
+  const mapX = (t) => padL + (Math.max(0, t) / maxT) * drawW;
+  const mapY = (v) => padT + drawH - ((v - minW) / Math.max(0.01, maxW - minW)) * drawH;
+
+  // Draw colored phase segments sequentially
+  for (let i = 1; i < samples.length; i++) {
+    const a = samples[i - 1];
+    const b = samples[i];
+    const p = b.phase || "idle_baseline";
+    ctx.beginPath();
+    ctx.moveTo(mapX(Number(a.elapsed_s || 0)), mapY(Number(a.watts || 0)));
+    ctx.lineTo(mapX(Number(b.elapsed_s || 0)), mapY(Number(b.watts || 0)));
+    if (p === "snn_inference") {
+      ctx.setLineDash([]);
+      ctx.strokeStyle = "#00e5a0";
+      ctx.lineWidth = compact ? 2.0 : 2.5;
+    } else if (p === "yolo_inference") {
+      ctx.setLineDash([]);
+      ctx.strokeStyle = "#ff4455";
+      ctx.lineWidth = compact ? 2.0 : 2.5;
+    } else {
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = "#64748b";
+      ctx.lineWidth = 1.5;
+    }
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // Latest sample point dot
+  const last = samples[samples.length - 1];
+  const lx = mapX(Number(last.elapsed_s || 0));
+  const ly = mapY(Number(last.watts || 0));
+  ctx.beginPath();
+  ctx.arc(lx, ly, compact ? 3 : 4.5, 0, Math.PI * 2);
+  ctx.fillStyle =
+    last.phase === "yolo_inference"
+      ? "#ff4455"
+      : last.phase === "snn_inference"
+        ? "#00e5a0"
+        : "#94a3b8";
+  ctx.fill();
+
+  if (!compact) {
+    ctx.fillStyle = "#7b889e";
+    ctx.font = "10px monospace";
+    ctx.fillText(`${maxW.toFixed(1)}W`, 4, padT + 10);
+    ctx.fillText(`${minW.toFixed(1)}W`, 4, padT + drawH);
+    ctx.fillText("0.0s", padL, h - 6);
+    ctx.fillText(`${maxT.toFixed(1)}s`, padL + drawW - 34, h - 6);
+  }
+}
+
+// ── 5. Multi-Session Benchmark History & Inspection ──────────────────────────
+async function loadLiveSensorBadge() {
+  try {
+    const res = await fetch("/api/power/live");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.source) {
+      updateSourceBadges(data.source, data.is_estimated, data.sensor_detail);
+    }
+    if (Number.isFinite(Number(data.watts))) {
+      setStyle("sysPowerStatus", "display", "inline");
+      setTxt("globalSnnPower", `${Number(data.watts).toFixed(2)} W`);
+      setTxt("miniLiveWatts", `${Number(data.watts).toFixed(2)} W`);
+      setTxt("liveRailNowVal", `${Number(data.watts).toFixed(2)} W`);
+    }
+  } catch (err) {
+    console.warn("Could not read /api/power/live:", err);
+  }
+}
+
+async function loadSessionHistory() {
+  try {
+    const res = await fetch("/api/sessions");
+    if (!res.ok) return;
+    const data = await res.json();
+    const list = Array.isArray(data.sessions) ? data.sessions : [];
+
+    list.forEach((summary) => {
+      ensureSessionRecord(summary.session_id, summary);
+    });
+    // Preserve backend ordering (newest first) while keeping any active in-progress session at top
+    const activeSid = state.activeSessionId;
+    const orderedIds = [];
+    if (activeSid && state.sessionMap[activeSid]) orderedIds.push(activeSid);
+    list.forEach((s) => {
+      if (s.session_id && !orderedIds.includes(s.session_id)) {
+        orderedIds.push(s.session_id);
+      }
+    });
+    state.sessions = orderedIds.map((id) => state.sessionMap[id].summary);
+
+    if (!state.viewedSessionId && state.sessions.length > 0) {
+      await selectViewedSession(state.sessions[0].session_id);
+    } else {
+      renderSessionControls();
+    }
+    rebuildLatencyHistoryFromSessions();
+  } catch (err) {
+    console.warn("Could not fetch /api/sessions:", err);
+  }
+}
+
+async function selectViewedSession(sessionId) {
+  if (!sessionId) return;
+  state.viewedSessionId = sessionId;
+  let rec = state.sessionMap[sessionId];
+
+  if (!rec || (!rec.active && rec.samples.length === 0)) {
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+      if (res.ok) {
+        const full = await res.json();
+        rec = ensureSessionRecord(sessionId, full);
+        if (Array.isArray(full.samples)) {
+          full.samples.forEach((s) => ingestSampleIntoSession(rec, s));
+        }
+      }
+    } catch (err) {
+      console.warn(`Failed to fetch session ${sessionId}:`, err);
+    }
+  }
+
+  if (rec) {
+    updatePhaseBadges(rec.active ? rec.currentPhase : "complete");
+    updateSessionReadouts(rec);
+  }
+  renderSessionControls();
+  renderViewedPowerCharts({ resetChart: true });
+}
+
+function renderSessionControls() {
+  const select = getEl("sessionSelect");
+  if (select) {
+    select.innerHTML = "";
+    if (state.sessions.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Awaiting first benchmark...";
+      select.appendChild(opt);
+    } else {
+      state.sessions.forEach((s, idx) => {
+        const opt = document.createElement("option");
+        opt.value = s.session_id;
+        const rec = state.sessionMap[s.session_id];
+        const liveTag = rec?.active ? "[LIVE] " : `#${state.sessions.length - idx} `;
+        const snnW = s.phases?.snn_inference?.avg_watts;
+        const yoloW = s.phases?.yolo_inference?.avg_watts;
+        const statsTag =
+          Number.isFinite(snnW) && Number.isFinite(yoloW)
+            ? ` (${snnW.toFixed(1)}W vs ${yoloW.toFixed(1)}W)`
+            : "";
+        opt.textContent = `${liveTag}${s.image_name || s.session_id}${statsTag}`;
+        opt.selected = s.session_id === state.viewedSessionId;
+        select.appendChild(opt);
+      });
+    }
+  }
+
+  setTxt(
+    "sessionCountBadge",
+    `${state.sessions.length} Session${state.sessions.length === 1 ? "" : "s"} Recorded`
+  );
+  renderSessionHistoryTable();
+}
+
+function renderSessionHistoryTable() {
+  const tbody = getEl("sessionHistoryBody");
+  if (!tbody) return;
+
+  if (state.sessions.length === 0) {
+    tbody.innerHTML =
+      '<tr><td colspan="10" class="session-empty-cell">No benchmark sessions recorded yet. Upload an image or click a sample to start live hardware profiling.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = "";
+  state.sessions.forEach((s) => {
+    const rec = state.sessionMap[s.session_id];
+    const isActiveView = s.session_id === state.viewedSessionId;
+    const tr = document.createElement("tr");
+    if (isActiveView) tr.classList.add("active-session-row");
+
+    const snn = s.phases?.snn_inference || {};
+    const yolo = s.phases?.yolo_inference || {};
+    const cmp = s.comparison || {};
+    const truth = formatSourceTruth(s.source, s.is_estimated, s.sensor_detail);
+
+    const snnAvg = Number.isFinite(snn.avg_watts) ? `${snn.avg_watts.toFixed(2)} W` : "--";
+    const snnPeak = Number.isFinite(snn.peak_watts) ? `${snn.peak_watts.toFixed(2)} W` : "--";
+    const snnEnergy = Number.isFinite(snn.total_energy_mj)
+      ? `${formatEnergyValue(snn.total_energy_mj)} / ${formatEnergyValue(snn.energy_per_inference_mj)}`
+      : "--";
+    const snnLat = Number.isFinite(snn.mean_latency_ms)
+      ? `${snn.mean_latency_ms.toFixed(1)} ms`
+      : "--";
+
+    const yoloAvg = Number.isFinite(yolo.avg_watts) ? `${yolo.avg_watts.toFixed(2)} W` : "--";
+    const yoloPeak = Number.isFinite(yolo.peak_watts) ? `${yolo.peak_watts.toFixed(2)} W` : "--";
+    const yoloEnergy = Number.isFinite(yolo.total_energy_mj)
+      ? `${formatEnergyValue(yolo.total_energy_mj)} / ${formatEnergyValue(yolo.energy_per_inference_mj)}`
+      : "--";
+    const yoloLat = Number.isFinite(yolo.mean_latency_ms)
+      ? `${yolo.mean_latency_ms.toFixed(1)} ms`
+      : "--";
+
+    const ratioTxt = Number.isFinite(cmp.power_ratio_yolo_over_snn)
+      ? `${cmp.power_ratio_yolo_over_snn.toFixed(2)}× (${Number(cmp.energy_savings_pct || 0).toFixed(0)}% saved)`
+      : rec?.active
+        ? "LIVE..."
+        : "--";
+
+    const timeStr = s.started_at_utc
+      ? new Date(s.started_at_utc).toLocaleTimeString([], { hour12: false })
+      : "--";
+
+    tr.innerHTML = `
+      <td>
+        <div class="session-img-name">${escapeHtml(s.image_name || "Upload")}</div>
+        <div class="session-sub-meta">${escapeHtml(s.session_id)} · ${escapeHtml(timeStr)}</div>
+      </td>
+      <td><span class="source-truth-badge ${truth.cls}" title="${escapeHtml(truth.detail)}">${escapeHtml(truth.shortLabel)}</span></td>
+      <td class="text-emerald">${snnAvg} / ${snnPeak}</td>
+      <td>${snnEnergy}</td>
+      <td>${snnLat}</td>
+      <td class="text-crimson">${yoloAvg} / ${yoloPeak}</td>
+      <td>${yoloEnergy}</td>
+      <td>${yoloLat}</td>
+      <td class="text-cyan">${escapeHtml(ratioTxt)}</td>
+      <td><button class="btn btn-sm btn-secondary btn-inspect-session" type="button">${isActiveView ? "Viewing" : "Inspect"}</button></td>
+    `;
+
+    tr.addEventListener("click", () => {
+      selectViewedSession(s.session_id);
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+function rebuildLatencyHistoryFromSessions() {
+  const completed = state.sessions
+    .filter(
+      (s) =>
+        Number.isFinite(s.phases?.snn_inference?.mean_latency_ms) &&
+        Number.isFinite(s.phases?.yolo_inference?.mean_latency_ms)
+    )
+    .slice(0, 25)
+    .reverse();
+
+  state.latencyHistory = completed.map((s) =>
+    Number(s.phases.snn_inference.mean_latency_ms.toFixed(1))
+  );
+  state.yoloLatencyHistory = completed.map((s) =>
+    Number(s.phases.yolo_inference.mean_latency_ms.toFixed(1))
+  );
+
+  if (state.activeView === "view-power" || state.latencyHistory.length > 0) {
+    drawLatencyOscilloscope(state.latencyHistory, state.yoloLatencyHistory);
+  }
+}
+
+// ── 6. System Status & Curated Samples Loading ───────────────────────────────
 async function loadSystemStatus() {
   try {
     const res = await fetch("/api/status");
     const data = await res.json();
     if (data.ready) {
       setTxt("sysStatusText", "EDGE READY");
+    }
+    const pm = data.power_monitor || {};
+    const src = pm.source || data.power_source;
+    if (src) {
+      const isEst = pm.is_estimated !== undefined ? pm.is_estimated : data.power_is_estimated;
+      const detail = pm.sensor_detail || data.power_sensor_detail;
+      updateSourceBadges(src, isEst, detail);
     }
   } catch (err) {
     setTxt("sysStatusText", "STANDALONE");
@@ -170,11 +1509,11 @@ async function loadCuratedSamples() {
         card.setAttribute("data-id", sample.id);
         card.innerHTML = `
           <div class="sample-thumb-wrap">
-            <img src="/api/sample_img/${sample.source}/${sample.file}" alt="${sample.title}" class="sample-thumb" loading="lazy" />
+            <img src="/api/sample_img/${sample.source}/${sample.file}" alt="${escapeHtml(sample.title)}" class="sample-thumb" loading="lazy" />
           </div>
           <div class="sample-info">
-            <div class="sample-category">${sample.category}</div>
-            <div class="sample-name">${sample.title}</div>
+            <div class="sample-category">${escapeHtml(sample.category)}</div>
+            <div class="sample-name">${escapeHtml(sample.title)}</div>
           </div>
         `;
         card.addEventListener("click", () => {
@@ -186,7 +1525,6 @@ async function loadCuratedSamples() {
       });
     }
 
-    // Automatically trigger initial live inference on first sample
     if (state.samples.length > 0) {
       triggerSampleInference(state.samples[0].id);
     }
@@ -212,7 +1550,6 @@ async function triggerSampleInference(sampleId) {
     applyInferenceResult(data);
   } catch (err) {
     console.error("Sample detection failed:", err);
-    alert(`Could not complete inference: ${err.message}\nMake sure launch_neurocamo_software.bat is running.`);
     setTxt("cmpSnnBadge", "OFFLINE // RETRY");
     setTxt("cmpYoloBadge", "OFFLINE // RETRY");
   } finally {
@@ -247,7 +1584,7 @@ function updateYoloDisplay(yolo) {
   const cmpYoloImg = getEl("cmpYoloImg");
   const cmpYoloPh = getEl("cmpYoloPlaceholder");
   if (cmpYoloImg && yolo.result_png) {
-    cmpYoloImg.src = yolo.result_png;
+    if (cmpYoloImg.src !== yolo.result_png) cmpYoloImg.src = yolo.result_png;
     cmpYoloImg.style.display = "block";
     cmpYoloImg.classList.add("visible");
     if (cmpYoloPh) {
@@ -264,21 +1601,25 @@ function updateYoloDisplay(yolo) {
       setStyle("cmpYoloBadge", "color", "var(--color-crimson)");
       setStyle("cmpYoloBadge", "borderColor", "rgba(255, 68, 85, 0.5)");
     } else {
-      const top = yolo.detections && yolo.detections[0] ? yolo.detections[0] : { class: "Object", conf: 0 };
-      setTxt("cmpYoloBadge", `${yolo.boxes_count} DETECTED: ${top.class.toUpperCase()} (${top.conf}%)`);
+      const top =
+        yolo.detections && yolo.detections[0] ? yolo.detections[0] : { class: "Object", conf: 0 };
+      setTxt(
+        "cmpYoloBadge",
+        `${yolo.boxes_count} DETECTED: ${top.class.toUpperCase()} (${top.conf}%)`
+      );
       cmpYoloBadge.classList.add("detected");
       setStyle("cmpYoloBadge", "color", "var(--color-amber)");
       setStyle("cmpYoloBadge", "borderColor", "rgba(245, 163, 0, 0.5)");
     }
   }
 
-  const yoloLat = yolo.latency_ms !== undefined ? yolo.latency_ms.toFixed(1) : "42.7";
-  const yoloEnergy = yolo.energy_mj || 40.02;
-  setTxt("cmpYoloEnergy", `${yoloEnergy.toFixed(2)} mJ`);
+  const yoloLat = Number.isFinite(yolo.latency_ms) ? yolo.latency_ms.toFixed(1) : "--";
+  const yoloEnergy = Number.isFinite(yolo.energy_mj) ? `${yolo.energy_mj.toFixed(2)} mJ` : "-- mJ";
+  setTxt("cmpYoloEnergy", yoloEnergy);
   setTxt("cmpYoloLatency", `${yoloLat} ms`);
 }
 
-// ── 3. Custom Image Upload & Event Listeners ─────────────────────────────────
+// ── 7. Custom Image Upload & Event Listeners ─────────────────────────────────
 function setupEventListeners() {
   const fileInput = getEl("fileInput");
   const cmpFileInput = getEl("cmpFileInput");
@@ -286,9 +1627,13 @@ function setupEventListeners() {
   const handleFileUpload = async (file) => {
     if (!file) return;
 
-    // Do NOT force switchView away! Retain the mode the user is actively viewing
     document.querySelectorAll(".cmp-sample-btn").forEach((b) => b.classList.remove("active"));
     document.querySelectorAll(".sample-card").forEach((c) => c.classList.remove("active"));
+
+    // Ensure WS is connected before uploading so user sees live waveform immediately
+    if (!state.wsConnected) {
+      await connectPowerWebSocket({ waitOpenMs: 300 });
+    }
 
     const formData = new FormData();
     formData.append("image", file);
@@ -336,6 +1681,16 @@ function setupEventListeners() {
   }
   if (cmpFileInput) {
     cmpFileInput.addEventListener("change", (e) => handleFileUpload(e.target.files[0]));
+  }
+
+  // Session History Selector Dropdown
+  const sessionSelect = getEl("sessionSelect");
+  if (sessionSelect) {
+    sessionSelect.addEventListener("change", (e) => {
+      if (e.target.value) {
+        selectViewedSession(e.target.value);
+      }
+    });
   }
 
   // Comparison Sample Buttons
@@ -448,19 +1803,18 @@ function setupEventListeners() {
     btnPrintDossier.addEventListener("click", () => window.print());
   }
 
-  // Live Webcam Stream Button
+  // Live Webcam & RealSense Buttons
   const btnLiveCam = getEl("btnLiveCam");
   if (btnLiveCam) {
     btnLiveCam.addEventListener("click", toggleLiveWebcam);
   }
 
-  // Intel RealSense Live Button
   const btnRealSense = getEl("btnRealSense");
   if (btnRealSense) {
     btnRealSense.addEventListener("click", toggleRealSense);
   }
 
-  // Tactical Overlay Mode Buttons (Recon & Compare)
+  // Tactical Overlay Mode Buttons
   document.querySelectorAll(".overlay-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const mode = btn.getAttribute("data-overlay");
@@ -498,8 +1852,6 @@ function setProcessingState(busy) {
   }
 }
 
-
-
 // ── Feature 1: Live Webcam Stream Capture & Neural Processing ────────────────
 async function toggleLiveWebcam() {
   const btn = getEl("btnLiveCam");
@@ -508,7 +1860,6 @@ async function toggleLiveWebcam() {
   const canvas = getEl("webcamCaptureCanvas");
 
   if (state.isWebcamActive) {
-    // Stop Webcam
     if (state.webcamInterval) clearInterval(state.webcamInterval);
     if (state.webcamStream) {
       state.webcamStream.getTracks().forEach((track) => track.stop());
@@ -520,7 +1871,6 @@ async function toggleLiveWebcam() {
     return;
   }
 
-  // Start Webcam
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "environment" },
@@ -535,7 +1885,6 @@ async function toggleLiveWebcam() {
     if (btn) btn.classList.add("streaming");
     if (btnTxt) btnTxt.textContent = "Stop Live Cam";
 
-    // Continuous Frame Loop (~10 FPS to balance GPU and network)
     const ctx = canvas.getContext("2d");
     state.webcamInterval = setInterval(async () => {
       if (!state.isWebcamActive || state.isProcessingCamFrame) return;
@@ -545,28 +1894,32 @@ async function toggleLiveWebcam() {
       canvas.height = video.videoHeight || 480;
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      canvas.toBlob(async (blob) => {
-        if (!blob || !state.isWebcamActive) return;
-        state.isProcessingCamFrame = true;
-        try {
-          const formData = new FormData();
-          formData.append("image", blob, "webcam_frame.jpg");
-          formData.append("yolo_conf", state.yoloConf);
-          formData.append("env_filter", state.envFilter);
-          formData.append("is_live", "1");
-          formData.append("stream_quality", state.streamQuality);
+      canvas.toBlob(
+        async (blob) => {
+          if (!blob || !state.isWebcamActive) return;
+          state.isProcessingCamFrame = true;
+          try {
+            const formData = new FormData();
+            formData.append("image", blob, "webcam_frame.jpg");
+            formData.append("yolo_conf", state.yoloConf);
+            formData.append("env_filter", state.envFilter);
+            formData.append("is_live", "1");
+            formData.append("stream_quality", state.streamQuality);
 
-          const res = await fetch("/api/detect", { method: "POST", body: formData });
-          if (res.ok) {
-            const data = await res.json();
-            applyInferenceResult(data);
+            const res = await fetch("/api/detect", { method: "POST", body: formData });
+            if (res.ok) {
+              const data = await res.json();
+              applyInferenceResult(data);
+            }
+          } catch (err) {
+            console.warn("Live cam frame dropped:", err);
+          } finally {
+            state.isProcessingCamFrame = false;
           }
-        } catch (err) {
-          console.warn("Live cam frame dropped:", err);
-        } finally {
-          state.isProcessingCamFrame = false;
-        }
-      }, "image/jpeg", 0.65);
+        },
+        "image/jpeg",
+        0.65
+      );
     }, 80);
   } catch (err) {
     console.warn("Browser webcam unavailable, switching to RealSense D435i...", err);
@@ -679,8 +2032,7 @@ async function toggleRealSense() {
 function setTacticalOverlay(mode) {
   state.currentOverlay = mode;
   document.querySelectorAll(".overlay-btn").forEach((btn) => {
-    if (btn.getAttribute("data-overlay") === mode) btn.classList.add("active");
-    else btn.classList.remove("active");
+    btn.classList.toggle("active", btn.getAttribute("data-overlay") === mode);
   });
 
   if (!state.currentResult) return;
@@ -742,12 +2094,11 @@ function executeSlewToCue() {
   }, 900);
 }
 
-// ── Feature 2: Environmental Stress Testing ──────────────────────────────────
+// ── Feature 4: Environmental Stress Testing ──────────────────────────────────
 async function triggerEnvReeval(filter) {
   state.envFilter = filter;
   document.querySelectorAll(".env-chip").forEach((c) => {
-    if (c.getAttribute("data-filter") === filter) c.classList.add("active");
-    else c.classList.remove("active");
+    c.classList.toggle("active", c.getAttribute("data-filter") === filter);
   });
 
   setProcessingState(true);
@@ -755,7 +2106,7 @@ async function triggerEnvReeval(filter) {
     const res = await fetch("/api/env_reeval", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filter: filter, yolo_conf: state.yoloConf }),
+      body: JSON.stringify({ env: filter, filter: filter, yolo_conf: state.yoloConf }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -767,7 +2118,7 @@ async function triggerEnvReeval(filter) {
   }
 }
 
-// ── Feature 1: Temporal Spike Evolution Scrubber ────────────────────────────
+// ── Feature 5: Temporal Spike Evolution Scrubber ─────────────────────────────
 function updateTemporalDisplay(step) {
   state.temporalStep = step;
   const slider = getEl("temporalSlider");
@@ -776,7 +2127,11 @@ function updateTemporalDisplay(step) {
   }
   setTxt("temporalStepVal", `t = ${step} / 16`);
 
-  if (!state.currentResult || !state.currentResult.temporal_evolution || !state.currentResult.temporal_evolution.length) {
+  if (
+    !state.currentResult ||
+    !state.currentResult.temporal_evolution ||
+    !state.currentResult.temporal_evolution.length
+  ) {
     return;
   }
   const evo = state.currentResult.temporal_evolution;
@@ -824,28 +2179,53 @@ function toggleTemporalPlay() {
   }
 }
 
-// ── Feature 4: Mission Dossier Export ────────────────────────────────────────
+// ── Feature 6: Mission Dossier Export ────────────────────────────────────────
 function openDossierModal() {
   const modal = getEl("dossierModal");
   if (!modal || !state.currentResult) return;
 
   const data = state.currentResult;
   const yolo = data.yolo_benchmark || {};
+  const bsRaw = data.benchmark_session;
+  const bs = bsRaw?.summary || bsRaw || state.sessionMap[state.viewedSessionId]?.summary || {};
   const confPct = ((data.confidence || 0) * 100).toFixed(1);
-  const yoloConfPct = yolo.detections && yolo.detections.length > 0 ? yolo.detections[0].conf : "0.0";
-  const snnPwr = data.dynamic_energy?.power_snn_w ?? data.telemetry?.power_snn_w ?? 0.58;
-  const annPwr = yolo.power_w ?? data.telemetry?.power_ann_w ?? 8.45;
-  const snnEnergy = data.dynamic_energy?.snn_energy_mj ?? 8.14;
-  const yoloEnergy = yolo.energy_mj ?? 40.02;
-  const snnLat = data.latency_ms !== undefined ? data.latency_ms.toFixed(1) : "16.1";
-  const yoloLat = yolo.latency_ms !== undefined ? yolo.latency_ms.toFixed(1) : "45.7";
-  const sparsityPct = ((data.sparsity || 0.784) * 100).toFixed(1);
+  const yoloConfPct =
+    yolo.detections && yolo.detections.length > 0 ? yolo.detections[0].conf : "0.0";
 
-  // Set timestamps & mission code
-  setTxt("dosTimestamp", new Date().toUTCString());
-  setTxt("dosMissionCode", `NC-RECON-${Math.floor(1000 + Math.random() * 9000)}`);
+  const snnPwr =
+    bs.phases?.snn_inference?.avg_watts ??
+    data.dynamic_energy?.power_snn_w ??
+    data.telemetry?.power_snn_w ??
+    null;
+  const annPwr =
+    bs.phases?.yolo_inference?.avg_watts ?? yolo.power_w ?? data.telemetry?.power_ann_w ?? null;
+  const snnEnergy =
+    bs.phases?.snn_inference?.energy_per_inference_mj ??
+    data.dynamic_energy?.measured_snn_energy_mj ??
+    data.dynamic_energy?.snn_energy_mj ??
+    null;
+  const yoloEnergy =
+    bs.phases?.yolo_inference?.energy_per_inference_mj ??
+    data.dynamic_energy?.measured_yolo_energy_mj ??
+    yolo.energy_mj ??
+    null;
+  const snnLat = Number.isFinite(data.latency_ms) ? data.latency_ms : null;
+  const yoloLat = Number.isFinite(yolo.latency_ms) ? yolo.latency_ms : null;
+  const sparsityPct = Number.isFinite(data.sparsity) ? (data.sparsity * 100).toFixed(1) : "--";
 
-  // Set Evidence Images
+  const truth = formatSourceTruth(
+    bs.source || state.sensorInfo.source,
+    bs.is_estimated !== undefined ? bs.is_estimated : state.sensorInfo.is_estimated,
+    bs.sensor_detail || state.sensorInfo.sensor_detail
+  );
+
+  setTxt("dosTimestamp", bs.completed_at_utc || new Date().toUTCString());
+  setTxt(
+    "dosMissionCode",
+    (bs.session_id || state.viewedSessionId || state.activeSessionId || "NC-LIVE").toUpperCase()
+  );
+  setTxt("dosHardwareSource", `${truth.label} (${truth.detail})`);
+
   const dosRaw = getEl("dosRawImg");
   if (dosRaw && data.input_png && dosRaw.src !== data.input_png) dosRaw.src = data.input_png;
   const dosSnn = getEl("dosSnnImg");
@@ -853,56 +2233,81 @@ function openDossierModal() {
   const dosYolo = getEl("dosYoloImg");
   if (dosYolo && yolo.result_png && dosYolo.src !== yolo.result_png) dosYolo.src = yolo.result_png;
 
-  // Set Table Values
-  const detected = data.detected !== undefined ? !!data.detected : (data.verdict === "DETECTED" || data.verdict === "POSSIBLE TARGET");
+  const detected =
+    data.detected !== undefined
+      ? Boolean(data.detected)
+      : data.verdict === "DETECTED" || data.verdict === "POSSIBLE TARGET";
   setTxt("dosSnnVerdict", detected ? `CAMOUFLAGE LOCK (${confPct}%)` : "SECTOR CLEAR");
-  setTxt("dosYoloVerdict", yolo.boxes_count > 0 ? `${yolo.boxes_count} OBJECTS DETECTED` : "0 OBJECTS DETECTED (MISSED)");
+  setTxt(
+    "dosYoloVerdict",
+    yolo.boxes_count > 0 ? `${yolo.boxes_count} OBJECTS DETECTED` : "0 OBJECTS DETECTED (MISSED)"
+  );
 
   setTxt("dosSnnConf", `${confPct}%`);
   setTxt("dosYoloConf", `${yoloConfPct}%`);
   const confDiff = (parseFloat(confPct) - parseFloat(yoloConfPct)).toFixed(1);
   setTxt("dosConfAdv", `+${confDiff}% SNN Saliency Advantage`);
 
-  setTxt("dosSnnPower", `${snnPwr.toFixed(2)} W`);
-  setTxt("dosYoloPower", `${annPwr.toFixed(2)} W`);
-  const pwrRatio = (annPwr / Math.max(0.1, snnPwr)).toFixed(1);
-  setTxt("dosPowerAdv", `${pwrRatio}× Lower Power Consumption`);
+  setTxt("dosSnnPower", Number.isFinite(snnPwr) ? `${snnPwr.toFixed(2)} W` : "-- W");
+  setTxt("dosYoloPower", Number.isFinite(annPwr) ? `${annPwr.toFixed(2)} W` : "-- W");
+  if (Number.isFinite(snnPwr) && Number.isFinite(annPwr) && snnPwr > 0) {
+    setTxt("dosPowerAdv", `${(annPwr / snnPwr).toFixed(2)}× Lower Power Consumption`);
+  } else {
+    setTxt("dosPowerAdv", "--");
+  }
 
-  setTxt("dosSnnEnergy", `${snnEnergy.toFixed(2)} mJ`);
-  setTxt("dosYoloEnergy", `${yoloEnergy.toFixed(2)} mJ`);
-  const energyRatio = (yoloEnergy / Math.max(0.01, snnEnergy)).toFixed(1);
-  setTxt("dosEnergyAdv", `${energyRatio}× Synaptic Energy Savings`);
+  setTxt("dosSnnEnergy", Number.isFinite(snnEnergy) ? `${snnEnergy.toFixed(2)} mJ` : "-- mJ");
+  setTxt("dosYoloEnergy", Number.isFinite(yoloEnergy) ? `${yoloEnergy.toFixed(2)} mJ` : "-- mJ");
+  if (Number.isFinite(snnEnergy) && Number.isFinite(yoloEnergy) && snnEnergy > 0) {
+    setTxt("dosEnergyAdv", `${(yoloEnergy / snnEnergy).toFixed(2)}× Energy Efficiency`);
+  } else {
+    setTxt("dosEnergyAdv", "--");
+  }
 
-  setTxt("dosSnnLat", `${snnLat} ms (~${(1000 / parseFloat(snnLat)).toFixed(0)} FPS)`);
-  setTxt("dosYoloLat", `${yoloLat} ms (~${(1000 / parseFloat(yoloLat)).toFixed(0)} FPS)`);
-  const latSpeedup = (parseFloat(yoloLat) / Math.max(1, parseFloat(snnLat))).toFixed(1);
-  setTxt("dosLatAdv", `${latSpeedup}× Real-time Edge Speedup`);
+  setTxt(
+    "dosSnnLat",
+    Number.isFinite(snnLat) && snnLat > 0
+      ? `${snnLat.toFixed(1)} ms (~${(1000 / snnLat).toFixed(0)} FPS)`
+      : "-- ms"
+  );
+  setTxt(
+    "dosYoloLat",
+    Number.isFinite(yoloLat) && yoloLat > 0
+      ? `${yoloLat.toFixed(1)} ms (~${(1000 / yoloLat).toFixed(0)} FPS)`
+      : "-- ms"
+  );
+  if (Number.isFinite(snnLat) && Number.isFinite(yoloLat) && snnLat > 0) {
+    setTxt("dosLatAdv", `${(yoloLat / snnLat).toFixed(2)}× Real-time Edge Speedup`);
+  } else {
+    setTxt("dosLatAdv", "--");
+  }
 
   setTxt("dosSnnSparsity", `${sparsityPct}% Silent Synapses`);
-
   modal.style.display = "flex";
 }
 
-// ── 4. Apply Detection Results to All Views (100% Null-Safe) ─────────────────
-function applyInferenceResult(data) {
+// ── 8. Apply Detection Results to All Views ──────────────────────────────────
+function applyInferenceResult(data, opts = {}) {
   if (!data) return;
   state.currentResult = data;
 
   try {
     const confPct = ((data.confidence || 0) * 100).toFixed(1);
-    const detected = data.detected !== undefined ? !!data.detected : (data.verdict === "DETECTED" || data.verdict === "POSSIBLE TARGET");
-    const lat = data.latency_ms !== undefined ? data.latency_ms.toFixed(1) : "16.1";
-    const fpsEq = data.latency_ms > 0 ? (1000.0 / data.latency_ms).toFixed(0) : "60";
+    const detected =
+      data.detected !== undefined
+        ? Boolean(data.detected)
+        : data.verdict === "DETECTED" || data.verdict === "POSSIBLE TARGET";
+    const lat = Number.isFinite(data.latency_ms) ? data.latency_ms.toFixed(1) : "--";
+    const fpsEq =
+      Number.isFinite(data.latency_ms) && data.latency_ms > 0
+        ? (1000.0 / data.latency_ms).toFixed(0)
+        : "--";
 
-    // ══════════════════════════════════════════════════════════
-    // A. GENERAL TACTICAL RECONNAISSANCE VIEW (RAW vs SNN MASK)
-    // ══════════════════════════════════════════════════════════
+    // A. Reconnaissance View
     const rawImg = getEl("rawImg");
     const rawPh = getEl("rawPlaceholder");
     if (rawImg && data.input_png) {
-      if (rawImg.src !== data.input_png) {
-        rawImg.src = data.input_png;
-      }
+      if (rawImg.src !== data.input_png) rawImg.src = data.input_png;
       rawImg.style.display = "block";
       rawImg.classList.add("visible");
       if (rawPh) {
@@ -910,7 +2315,7 @@ function applyInferenceResult(data) {
         rawPh.classList.add("hidden");
       }
     }
-    const szStr = data.image_size ? `${data.image_size[0]}x${data.image_size[1]}` : "960x960";
+    const szStr = data.image_size ? `${data.image_size[0]}x${data.image_size[1]}` : "--";
     setTxt("rawMeta", `${data.filename || "Optical Frame"} [${szStr}]`);
 
     const detImg = getEl("detImg");
@@ -935,40 +2340,134 @@ function applyInferenceResult(data) {
       } else {
         reconVerdict.textContent = "SECTOR CLEAR // NO CAMOUFLAGE";
         reconVerdict.className = "box-value text-muted";
-        setTxt("reconVerdictSub", data.gate_reason || "Zero significant camouflage activations in sector");
+        setTxt(
+          "reconVerdictSub",
+          data.gate_reason || "Zero significant camouflage activations in sector"
+        );
       }
     }
     setTxt("reconConf", `${confPct}%`);
     setStyle("reconConfBar", "width", `${confPct}%`);
     setTxt("reconTex", (data.texture_score || 0).toFixed(1));
-    setTxt("reconGateReason", data.plain_background ? "Low Complexity: Flat Background" : "High Complexity: Passed Scene Gate");
+    setTxt(
+      "reconGateReason",
+      data.plain_background ? "Low Complexity: Flat Background" : "High Complexity: Passed Scene Gate"
+    );
     setTxt("reconLatency", `${lat} ms`);
     setTxt("reconFps", `Edge Throughput: ~${fpsEq} FPS`);
 
-    // Dynamic SNN Power & Energy (Updated on every inference run)
-    const snnPwr = data.dynamic_energy?.power_snn_w ?? data.telemetry?.power_snn_w ?? 0.58;
-    const snnEnergy = data.dynamic_energy?.snn_energy_mj ?? 8.144;
-    const snnStepEnergy = data.dynamic_energy?.snn_step_energy_mj ?? (snnEnergy / 16.0);
-    const sparsityPct = ((data.sparsity || 0.784) * 100).toFixed(1);
+    // B. Merge Benchmark Session if present (preserving any samples already streamed via WS)
+    const bsRaw = data.benchmark_session;
+    const bsSummary = bsRaw?.summary || bsRaw || {};
+    const bsSamples = Array.isArray(bsRaw?.samples)
+      ? bsRaw.samples
+      : Array.isArray(bsSummary?.samples)
+        ? bsSummary.samples
+        : [];
+    const anotherSessionLive = Boolean(
+      state.activeSessionId &&
+        (!bsSummary?.session_id || state.activeSessionId !== bsSummary.session_id)
+    );
+    if (!opts.skipSessionMerge && bsSummary && bsSummary.session_id) {
+      const rec = ensureSessionRecord(bsSummary.session_id, bsSummary);
+      if (rec) {
+        rec.active = false;
+        rec.currentPhase = "complete";
+        bsSamples.forEach((s) => ingestSampleIntoSession(rec, s));
+        if (state.activeSessionId === bsSummary.session_id) {
+          state.activeSessionId = null;
+        }
+        if (!anotherSessionLive) {
+          state.viewedSessionId = bsSummary.session_id;
+          if (bsSummary.source) {
+            updateSourceBadges(bsSummary.source, bsSummary.is_estimated, bsSummary.sensor_detail);
+          }
+          updatePhaseBadges("complete");
+          updateSessionReadouts(rec);
+          renderViewedPowerCharts();
+        }
+        renderSessionControls();
+        rebuildLatencyHistoryFromSessions();
+      }
+    } else if (
+      !anotherSessionLive &&
+      (data.power_live?.source || data.telemetry?.source || data.dynamic_energy?.source)
+    ) {
+      const srcObj = data.power_live?.source
+        ? data.power_live
+        : data.telemetry?.source
+          ? data.telemetry
+          : data.dynamic_energy;
+      updateSourceBadges(srcObj.source, srcObj.is_estimated, srcObj.sensor_detail);
+    }
+
+    // Real SNN & YOLO metrics
     const yolo = data.yolo_benchmark || {};
-    const annPwr = yolo.power_w ?? data.telemetry?.power_ann_w ?? 8.45;
-    const yoloEnergy = yolo.energy_mj ?? 40.02;
-    const yoloOps = yolo.gflops ? `${yolo.gflops.toFixed(2)} GFLOPs (Dense)` : "8.70 GFLOPs (Dense)";
-    const yoloLat = yolo.latency_ms !== undefined ? yolo.latency_ms.toFixed(1) : "45.7";
-    const savRatio = (yoloEnergy / Math.max(0.01, snnEnergy)).toFixed(1);
-    const reductionText = data.dynamic_energy?.energy_reduction_factor ?? `${savRatio}x`;
+    const bs = bsSummary;
+    const snnPwr =
+      bs.phases?.snn_inference?.avg_watts ??
+      data.dynamic_energy?.power_snn_w ??
+      data.telemetry?.power_snn_w ??
+      null;
+    const annPwr =
+      bs.phases?.yolo_inference?.avg_watts ??
+      yolo.power_w ??
+      data.telemetry?.power_ann_w ??
+      null;
 
-    // Update Live Reconnaissance View Power Waveform & HUD
-    setTxt("reconPower", `${snnPwr.toFixed(2)} W`);
-    setTxt("reconEnergy", detected ? "Active LIF Spike Burst (Target Lock)" : "Event-Gated Low Power (Sector Clear)");
-    setTxt("snnCardPower", `${snnPwr.toFixed(2)} W`);
-    setTxt("globalSnnPower", `${snnPwr.toFixed(2)} W`);
-    drawLivePowerWaveform("reconPowerCanvas", state.snnPowerHistory, state.yoloPowerHistory, false);
-    drawLivePowerWaveform("sysPowerCardCanvas", state.snnPowerHistory, state.yoloPowerHistory, true);
+    const snnCmosEnergy = data.dynamic_energy?.snn_energy_mj ?? null;
+    const snnMeasEnergy =
+      bs.phases?.snn_inference?.energy_per_inference_mj ??
+      data.dynamic_energy?.measured_snn_energy_mj ??
+      null;
+    const yoloMeasEnergy =
+      bs.phases?.yolo_inference?.energy_per_inference_mj ??
+      data.dynamic_energy?.measured_yolo_energy_mj ??
+      yolo.energy_mj ??
+      null;
 
-    // ══════════════════════════════════════════════════════════
-    // B. HEAD-TO-HEAD BENCHMARK VIEW (SNN vs YOLOV8-NANO)
-    // ══════════════════════════════════════════════════════════
+    const sparsityPct = Number.isFinite(data.sparsity) ? (data.sparsity * 100).toFixed(1) : "--";
+    const yoloOps = Number.isFinite(yolo.gflops)
+      ? `${yolo.gflops.toFixed(2)} GFLOPs (Dense)`
+      : "8.70 GFLOPs (Dense)";
+
+    if (!anotherSessionLive) {
+      if (Number.isFinite(snnPwr)) {
+        state.latestMeasuredSnnW = snnPwr;
+        setTxt("reconPower", `${snnPwr.toFixed(2)} W`);
+        setTxt("snnCardPower", `${snnPwr.toFixed(2)} W`);
+        setStyle("snnCardPowerPill", "display", "inline-flex");
+        setTxt("globalSnnPower", `${snnPwr.toFixed(2)} W`);
+        setStyle("sysPowerStatus", "display", "inline");
+        setTxt("cmpSnnPower", `${snnPwr.toFixed(2)} W`);
+        setTxt("hdrSnnPower", `${snnPwr.toFixed(2)}W`);
+        setTxt("pwrSnn", `${snnPwr.toFixed(2)} W`);
+      }
+
+      if (Number.isFinite(annPwr)) {
+        state.latestMeasuredYoloW = annPwr;
+        setTxt("cmpYoloPower", `${annPwr.toFixed(2)} W`);
+        setTxt("hdrYoloPower", `${annPwr.toFixed(2)}W`);
+        setTxt("pwrAnn", `${annPwr.toFixed(2)} W`);
+      }
+
+      updateBatteryAutonomy(state.batteryCapacityMah);
+    }
+
+    if (Number.isFinite(snnMeasEnergy)) {
+      setTxt("reconEnergy", `${formatEnergyValue(snnMeasEnergy)} / inference (measured)`);
+      setTxt(
+        "cmpSnnEnergy",
+        Number.isFinite(snnCmosEnergy)
+          ? `${formatEnergyValue(snnMeasEnergy)} hw (${snnCmosEnergy.toFixed(2)} mJ CMOS)`
+          : `${formatEnergyValue(snnMeasEnergy)} hw`
+      );
+    } else if (Number.isFinite(snnCmosEnergy)) {
+      setTxt("reconEnergy", `${snnCmosEnergy.toFixed(2)} mJ (CMOS model)`);
+      setTxt("cmpSnnEnergy", `${snnCmosEnergy.toFixed(2)} mJ (CMOS)`);
+    }
+
+    // C. Head-to-Head Compare View
     const cmpSnnImg = getEl("cmpSnnImg");
     const cmpSnnPh = getEl("cmpSnnPlaceholder");
     if (cmpSnnImg && data.result_png) {
@@ -978,18 +2477,6 @@ function applyInferenceResult(data) {
       if (cmpSnnPh) {
         cmpSnnPh.style.display = "none";
         cmpSnnPh.classList.add("hidden");
-      }
-    }
-
-    const cmpYoloImg = getEl("cmpYoloImg");
-    const cmpYoloPh = getEl("cmpYoloPlaceholder");
-    if (cmpYoloImg && yolo.result_png) {
-      cmpYoloImg.src = yolo.result_png;
-      cmpYoloImg.style.display = "block";
-      cmpYoloImg.classList.add("visible");
-      if (cmpYoloPh) {
-        cmpYoloPh.style.display = "none";
-        cmpYoloPh.classList.add("hidden");
       }
     }
 
@@ -1004,64 +2491,32 @@ function applyInferenceResult(data) {
     }
 
     updateYoloDisplay(yolo);
+    if (Number.isFinite(yoloMeasEnergy)) {
+      setTxt("cmpYoloEnergy", `${formatEnergyValue(yoloMeasEnergy)} hw`);
+    }
 
-    // 4. Dynamic Live Hardware Metrics (100% Calculated & Non-Static)
-    setTxt("cmpSnnPower", `${snnPwr.toFixed(2)} W`);
-    setTxt("cmpSnnEnergy", `${snnEnergy.toFixed(2)} mJ (${snnStepEnergy.toFixed(3)} mJ/step)`);
     setTxt("cmpSnnSparsity", `${sparsityPct}% Silent`);
     setTxt("cmpSnnLatency", `${lat} ms`);
-
-    setTxt("cmpYoloPower", `${annPwr.toFixed(2)} W`);
-    setTxt("cmpYoloEnergy", `${yoloEnergy.toFixed(2)} mJ`);
     setTxt("cmpYoloOps", yoloOps);
-    setTxt("cmpYoloLatency", `${yoloLat} ms`);
-
-    setTxt("hdrSnnPower", `${snnPwr.toFixed(2)}W`);
-    setTxt("hdrYoloPower", `${annPwr.toFixed(2)}W`);
 
     // Sync active environmental chip
     const activeEnv = data.env_filter || state.envFilter || "normal";
     document.querySelectorAll(".env-chip").forEach((c) => {
-      if (c.getAttribute("data-filter") === activeEnv) c.classList.add("active");
-      else c.classList.remove("active");
+      c.classList.toggle("active", c.getAttribute("data-filter") === activeEnv);
     });
 
-    // Update Temporal Evolution Scrubber display
     updateTemporalDisplay(16);
 
-    // Sync active scenario buttons
     if (data.sample_info?.id || state.currentSampleId) {
       const activeId = data.sample_info?.id || state.currentSampleId;
       document.querySelectorAll(".cmp-sample-btn").forEach((b) => {
-        if (b.getAttribute("data-sample") === activeId) b.classList.add("active");
-        else b.classList.remove("active");
+        b.classList.toggle("active", b.getAttribute("data-sample") === activeId);
       });
     }
 
-    // Update Real-Time Dual Time-Series Histories
-    if (data.latency_ms !== undefined) {
-      state.latencyHistory.push(parseFloat(data.latency_ms.toFixed(1)));
-      if (state.latencyHistory.length > 25) state.latencyHistory.shift();
-    }
-    const curYoloLat = yolo.latency_ms !== undefined ? parseFloat(yolo.latency_ms.toFixed(1)) : 52.3;
-    state.yoloLatencyHistory.push(curYoloLat);
-    if (state.yoloLatencyHistory.length > 25) state.yoloLatencyHistory.shift();
-
-    state.snnPowerHistory.push(parseFloat(snnPwr.toFixed(2)));
-    if (state.snnPowerHistory.length > 25) state.snnPowerHistory.shift();
-
-    state.yoloPowerHistory.push(parseFloat(annPwr.toFixed(2)));
-    if (state.yoloPowerHistory.length > 25) state.yoloPowerHistory.shift();
-
     const isLiveActive = state.isWebcamActive || state.isRealSenseActive;
 
-    // Redraw dual time-series traces (always when in power view, throttled if live)
-    if (!isLiveActive || state.activeView === "view-power") {
-      drawPowerTraceChart(state.snnPowerHistory, state.yoloPowerHistory);
-      drawLatencyOscilloscope(state.latencyHistory, state.yoloLatencyHistory);
-    }
-
-    // Update STANAG 4586 / MAVLink Tactical GCS Console
+    // STANAG 4586 / MAVLink Tactical GCS Console
     const tel = data.telemetry || {};
     const azSign = (tel.bearing_deg || 0) >= 0 ? "+" : "";
     const elSign = (tel.elevation_deg || 0) >= 0 ? "+" : "";
@@ -1074,11 +2529,13 @@ function applyInferenceResult(data) {
     }
     const packetStatus = getEl("gcsPacketStatus");
     if (packetStatus) {
-      packetStatus.textContent = tel.detected ? "RS-422 Serial Link: TARGET LOCK // PTZ READY" : "RS-422 Serial Link: Standby / Sector Clear";
+      packetStatus.textContent = tel.detected
+        ? "RS-422 Serial Link: TARGET LOCK // PTZ READY"
+        : "RS-422 Serial Link: Standby / Sector Clear";
       packetStatus.style.color = tel.detected ? "var(--color-emerald)" : "var(--text-muted)";
     }
 
-    // Update Neuromorphic Core tab (only render heavy spectrogram canvas if tab is visible)
+    // Neuromorphic Core tab
     if (data.spectrogram) {
       if (!isLiveActive || state.activeView === "view-spikes") {
         renderSpectrogram(data.spectrogram);
@@ -1091,13 +2548,7 @@ function applyInferenceResult(data) {
     setTxt("sparsityVal", `${sparsityPct}%`);
     setTxt("zeroMacVal", `${sparsityPct}%`);
 
-    // Update Power tab
-    setTxt("pwrSnn", `${snnPwr.toFixed(2)} W`);
-    setTxt("pwrAnn", `${annPwr.toFixed(2)} W`);
-    setTxt("frameEnergyVal", `${snnEnergy.toFixed(2)} mJ`);
-    setTxt("annEnergyVal", `${yoloEnergy.toFixed(2)} mJ`);
-    setTxt("savingsFactorVal", `${savRatio}x`);
-
+    // Theoretical CMOS energy card
     if (data.dynamic_energy) {
       state.currentEnergy = data.dynamic_energy;
       if (!isLiveActive || state.activeView === "view-power") {
@@ -1109,118 +2560,7 @@ function applyInferenceResult(data) {
   }
 }
 
-// ── Canvas: Real-Time Continuous Power Draw Trace (Watts) ────────────────────
-function drawPowerTraceChart(snnHist, yoloHist) {
-  const canvas = getEl("powerTraceCanvas");
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  const w = canvas.width;
-  const h = canvas.height;
-
-  ctx.fillStyle = "#06080b";
-  ctx.fillRect(0, 0, w, h);
-
-  const padX = 45;
-  const padY = 25;
-  const drawW = w - padX * 2;
-  const drawH = h - padY * 2;
-
-  // Grid
-  ctx.strokeStyle = "rgba(0, 210, 255, 0.08)";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(padX, padY, drawW, drawH);
-
-  for (let y = padY + drawH / 4; y < padY + drawH; y += drawH / 4) {
-    ctx.beginPath();
-    ctx.moveTo(padX, y);
-    ctx.lineTo(padX + drawW, y);
-    ctx.stroke();
-  }
-  for (let x = padX + drawW / 4; x < padX + drawW; x += drawW / 4) {
-    ctx.beginPath();
-    ctx.moveTo(x, padY);
-    ctx.lineTo(x, padY + drawH);
-    ctx.stroke();
-  }
-
-  const maxPower = 10.0; // Jetson Nano 10W Profile limit
-  const count = Math.max(snnHist.length, yoloHist.length);
-  if (count === 0) return;
-  const stepW = drawW / Math.max(1, count - 1);
-
-  // 1. Draw YOLO Trace (Crimson)
-  ctx.beginPath();
-  yoloHist.forEach((val, i) => {
-    const x = padX + i * stepW;
-    const y = padY + drawH - (Math.min(maxPower, val) / maxPower) * drawH;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.strokeStyle = "#ff4455";
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
-
-  // 2. Draw SNN Trace (Emerald)
-  ctx.beginPath();
-  snnHist.forEach((val, i) => {
-    const x = padX + i * stepW;
-    const y = padY + drawH - (Math.min(maxPower, val) / maxPower) * drawH;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.strokeStyle = "#00e5a0";
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
-
-  // SNN Glow Fill under curve
-  ctx.lineTo(padX + (snnHist.length - 1) * stepW, padY + drawH);
-  ctx.lineTo(padX, padY + drawH);
-  ctx.closePath();
-  const grad = ctx.createLinearGradient(0, padY + drawH * 0.8, 0, padY + drawH);
-  grad.addColorStop(0, "rgba(0, 229, 160, 0.25)");
-  grad.addColorStop(1, "rgba(0, 229, 160, 0.0)");
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // Draw Latest Value Head Indicators
-  const lastSnn = snnHist[snnHist.length - 1] || 0.97;
-  const lastYolo = yoloHist[yoloHist.length - 1] || 8.85;
-
-  const lastX = padX + (count - 1) * stepW;
-  const snnY = padY + drawH - (lastSnn / maxPower) * drawH;
-  const yoloY = padY + drawH - (lastYolo / maxPower) * drawH;
-
-  // SNN point
-  ctx.fillStyle = "#00e5a0";
-  ctx.beginPath();
-  ctx.arc(lastX, snnY, 5, 0, Math.PI * 2);
-  ctx.fill();
-
-  // YOLO point
-  ctx.fillStyle = "#ff4455";
-  ctx.beginPath();
-  ctx.arc(lastX, yoloY, 5, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Axis Labels
-  ctx.fillStyle = "#7b889e";
-  ctx.font = "10px monospace";
-  ctx.fillText("10.0 W (Limit)", 4, padY + 10);
-  ctx.fillText("5.0 W", 14, padY + drawH / 2);
-  ctx.fillText("0.0 W", 14, padY + drawH);
-  ctx.fillText("Continuous Inferences (T-25)", padX, h - 6);
-  ctx.fillText("LIVE STREAM", padX + drawW - 65, h - 6);
-
-  // Update DOM Pills
-  const ratio = (lastYolo / Math.max(0.1, lastSnn)).toFixed(1);
-  setTxt("liveSnnPwrVal", `${lastSnn.toFixed(2)} W`);
-  setTxt("liveYoloPwrVal", `${lastYolo.toFixed(2)} W`);
-  setTxt("livePwrRatioVal", `${ratio}×`);
-  setTxt("livePwrAdv", `${ratio}× Lower Draw`);
-}
-
-
-// ── 5. Canvas: Comparative Latency & Throughput Trace (ms) ───────────────────
+// ── 9. Canvas: Comparative Latency & Throughput Trace (ms) ───────────────────
 function drawLatencyOscilloscope(snnHist, yoloHist) {
   const canvas = getEl("latencyCanvas");
   if (!canvas) return;
@@ -1231,12 +2571,11 @@ function drawLatencyOscilloscope(snnHist, yoloHist) {
   ctx.fillStyle = "#06080b";
   ctx.fillRect(0, 0, w, h);
 
-  const padX = 45;
-  const padY = 25;
+  const padX = 48;
+  const padY = 24;
   const drawW = w - padX * 2;
   const drawH = h - padY * 2;
 
-  // Grid
   ctx.strokeStyle = "rgba(0, 210, 255, 0.08)";
   ctx.lineWidth = 1;
   ctx.strokeRect(padX, padY, drawW, drawH);
@@ -1247,23 +2586,31 @@ function drawLatencyOscilloscope(snnHist, yoloHist) {
     ctx.lineTo(padX + drawW, y);
     ctx.stroke();
   }
-  for (let x = padX + drawW / 4; x < padX + drawW; x += drawW / 4) {
-    ctx.beginPath();
-    ctx.moveTo(x, padY);
-    ctx.lineTo(x, padY + drawH);
-    ctx.stroke();
+
+  const count = Math.max(snnHist?.length || 0, yoloHist?.length || 0);
+  if (count === 0) {
+    ctx.fillStyle = "#7b889e";
+    ctx.font = "12px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("Awaiting completed benchmark sessions...", w / 2, h / 2);
+    ctx.textAlign = "left";
+    setTxt("liveLatencyVal", "-- ms");
+    setTxt("liveYoloLatencyVal", "-- ms");
+    setTxt("liveLatRatioVal", "--×");
+    setTxt("liveLatAdv", "--× Speedup");
+    setTxt("liveThroughputAdvVal", "-- FPS");
+    setTxt("liveThroughputDeltaSub", "Awaiting benchmark");
+    return;
   }
 
-  const count = Math.max(snnHist.length, (yoloHist ? yoloHist.length : 0));
-  if (count === 0) return;
-  const maxVal = 80.0; // Fixed 80ms ceiling for consistent comparative review
-  const stepW = drawW / Math.max(1, count - 1);
+  const allVals = [...(snnHist || []), ...(yoloHist || [])].filter((v) => Number.isFinite(v));
+  const maxVal = Math.max(10.0, ...allVals) * 1.18;
+  const stepW = count > 1 ? drawW / (count - 1) : 0;
 
-  // 1. Draw YOLO Latency Trace (Crimson)
   if (yoloHist && yoloHist.length > 0) {
     ctx.beginPath();
     yoloHist.forEach((val, i) => {
-      const x = padX + i * stepW;
+      const x = count > 1 ? padX + i * stepW : padX + drawW / 2;
       const y = padY + drawH - (Math.min(maxVal, val) / maxVal) * drawH;
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
@@ -1273,66 +2620,61 @@ function drawLatencyOscilloscope(snnHist, yoloHist) {
     ctx.stroke();
   }
 
-  // 2. Draw SNN Latency Trace (Emerald)
-  ctx.beginPath();
-  snnHist.forEach((val, i) => {
-    const x = padX + i * stepW;
-    const y = padY + drawH - (Math.min(maxVal, val) / maxVal) * drawH;
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.strokeStyle = "#00e5a0";
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
+  if (snnHist && snnHist.length > 0) {
+    ctx.beginPath();
+    snnHist.forEach((val, i) => {
+      const x = count > 1 ? padX + i * stepW : padX + drawW / 2;
+      const y = padY + drawH - (Math.min(maxVal, val) / maxVal) * drawH;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = "#00e5a0";
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+  }
 
-  // SNN Gradient Fill
-  ctx.lineTo(padX + (snnHist.length - 1) * stepW, padY + drawH);
-  ctx.lineTo(padX, padY + drawH);
-  ctx.closePath();
-  const grad = ctx.createLinearGradient(0, padY + drawH * 0.6, 0, padY + drawH);
-  grad.addColorStop(0, "rgba(0, 229, 160, 0.22)");
-  grad.addColorStop(1, "rgba(0, 229, 160, 0.0)");
-  ctx.fillStyle = grad;
-  ctx.fill();
+  const lastSnn = snnHist[snnHist.length - 1];
+  const lastYolo = yoloHist[yoloHist.length - 1];
+  const lastX = count > 1 ? padX + (count - 1) * stepW : padX + drawW / 2;
 
-  // Latest Points
-  const lastSnn = snnHist[snnHist.length - 1] || 16.1;
-  const lastYolo = yoloHist ? (yoloHist[yoloHist.length - 1] || 52.3) : 52.3;
-  const lastX = padX + (count - 1) * stepW;
-
-  ctx.fillStyle = "#00e5a0";
-  ctx.beginPath();
-  ctx.arc(lastX, padY + drawH - (lastSnn / maxVal) * drawH, 5, 0, Math.PI * 2);
-  ctx.fill();
-
-  if (yoloHist && yoloHist.length > 0) {
+  if (Number.isFinite(lastSnn)) {
+    ctx.fillStyle = "#00e5a0";
+    ctx.beginPath();
+    ctx.arc(lastX, padY + drawH - (lastSnn / maxVal) * drawH, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (Number.isFinite(lastYolo)) {
     ctx.fillStyle = "#ff4455";
     ctx.beginPath();
     ctx.arc(lastX, padY + drawH - (lastYolo / maxVal) * drawH, 5, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Axis Labels
   ctx.fillStyle = "#7b889e";
   ctx.font = "10px monospace";
-  ctx.fillText("80 ms (12 FPS)", 4, padY + 10);
-  ctx.fillText("40 ms (25 FPS)", 4, padY + drawH / 2);
+  ctx.fillText(`${maxVal.toFixed(0)} ms`, 4, padY + 10);
+  ctx.fillText(`${(maxVal / 2).toFixed(0)} ms`, 4, padY + drawH / 2);
   ctx.fillText("0 ms", 14, padY + drawH);
-  ctx.fillText("Rolling Frame Stream (T-25)", padX, h - 6);
-  ctx.fillText("LIVE HEAD", padX + drawW - 65, h - 6);
+  ctx.fillText(`Sessions (${count})`, padX, h - 6);
+  ctx.fillText("LATEST", padX + drawW - 42, h - 6);
 
-  // Update DOM Pills
-  const speedup = (lastYolo / Math.max(1.0, lastSnn)).toFixed(1);
-  const snnFps = (1000.0 / Math.max(1, lastSnn)).toFixed(0);
-  const yoloFps = (1000.0 / Math.max(1, lastYolo)).toFixed(0);
-
-  setTxt("liveLatencyVal", `${lastSnn.toFixed(1)} ms (~${snnFps} FPS)`);
-  setTxt("liveYoloLatencyVal", `${lastYolo.toFixed(1)} ms (~${yoloFps} FPS)`);
-  setTxt("liveLatRatioVal", `${speedup}×`);
-  setTxt("liveLatAdv", `${speedup}× Speedup`);
+  if (Number.isFinite(lastSnn) && Number.isFinite(lastYolo)) {
+    const speedup = (lastYolo / Math.max(0.1, lastSnn)).toFixed(2);
+    const snnFps = (1000.0 / Math.max(0.1, lastSnn)).toFixed(0);
+    const yoloFps = (1000.0 / Math.max(0.1, lastYolo)).toFixed(0);
+    setTxt("liveLatencyVal", `${lastSnn.toFixed(1)} ms`);
+    setTxt("liveSnnFpsSub", `Throughput: ~${snnFps} FPS`);
+    setTxt("liveYoloLatencyVal", `${lastYolo.toFixed(1)} ms`);
+    setTxt("liveYoloFpsSub", `Throughput: ~${yoloFps} FPS (dense)`);
+    setTxt("liveLatRatioVal", `${speedup}×`);
+    setTxt("liveLatAdv", `${speedup}× Speedup`);
+    const fpsDelta = Math.abs(parseInt(snnFps, 10) - parseInt(yoloFps, 10));
+    setTxt("liveThroughputAdvVal", `${snnFps} FPS`);
+    setTxt("liveThroughputDeltaSub", `Δ ${fpsDelta} FPS vs Dense YOLO`);
+  }
 }
 
-// ── 6. Canvas: Dynamic Synaptic Energy per Frame ─────────────────────────────
+// ── 10. Canvas: Dynamic Synaptic Energy per Frame ────────────────────────────
 function drawDynamicEnergyChart(energyData) {
   const canvas = getEl("energyCanvas");
   if (!canvas) return;
@@ -1343,14 +2685,29 @@ function drawDynamicEnergyChart(energyData) {
   ctx.fillStyle = "#06080b";
   ctx.fillRect(0, 0, w, h);
 
+  if (
+    !energyData ||
+    !Number.isFinite(energyData.snn_energy_mj) ||
+    !Number.isFinite(energyData.ann_energy_mj)
+  ) {
+    ctx.fillStyle = "#7b889e";
+    ctx.font = "12px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("Awaiting inference synaptic energy calculation...", w / 2, h / 2);
+    ctx.textAlign = "left";
+    setTxt("frameEnergyVal", "-- mJ");
+    setTxt("annEnergyVal", "-- mJ");
+    setTxt("savingsFactorVal", "--×");
+    return;
+  }
+
   const padX = 40;
   const padY = 25;
   const drawW = w - padX * 2;
-  const drawH = h - padY * 2;
 
-  const snnVal = energyData.snn_energy_mj || 8.14;
-  const annVal = energyData.ann_energy_mj || 60.38;
-  const maxVal = Math.max(annVal * 1.15, 10.0);
+  const snnVal = energyData.snn_energy_mj;
+  const annVal = energyData.ann_energy_mj;
+  const maxVal = Math.max(annVal * 1.15, 1.0);
 
   const barH = 34;
   const y1 = padY + 30;
@@ -1359,207 +2716,54 @@ function drawDynamicEnergyChart(energyData) {
   const wSnn = (snnVal / maxVal) * drawW;
   const wAnn = (annVal / maxVal) * drawW;
 
-  // SNN Bar
   ctx.fillStyle = "#7b889e";
   ctx.font = "11px sans-serif";
   ctx.fillText("Proposed SNN (Event-Driven AC Spikes):", padX, y1 - 8);
 
   ctx.fillStyle = "rgba(0, 229, 160, 0.12)";
   ctx.fillRect(padX, y1, drawW, barH);
-  const gradSnn = ctx.createLinearGradient(padX, 0, padX + wSnn, 0);
+  const gradSnn = ctx.createLinearGradient(padX, 0, padX + Math.max(4, wSnn), 0);
   gradSnn.addColorStop(0, "#00b078");
-  gradSnn.addColorStop(1, "var(--color-emerald)");
+  gradSnn.addColorStop(1, "#00e5a0");
   ctx.fillStyle = gradSnn;
   ctx.fillRect(padX, y1, wSnn, barH);
-  ctx.strokeStyle = "var(--color-emerald)";
+  ctx.strokeStyle = "#00e5a0";
   ctx.lineWidth = 1.5;
   ctx.strokeRect(padX, y1, wSnn, barH);
 
   ctx.fillStyle = "#fff";
   ctx.font = "bold 12px monospace";
-  ctx.fillText(`${snnVal.toFixed(2)} mJ`, padX + wSnn + 10, y1 + 22);
+  ctx.fillText(`${snnVal.toFixed(2)} mJ`, Math.min(padX + drawW - 70, padX + wSnn + 10), y1 + 22);
 
-  // ANN Bar
   ctx.fillStyle = "#7b889e";
   ctx.font = "11px sans-serif";
   ctx.fillText("Conventional Dense ANN Baseline (Dense MACs):", padX, y2 - 8);
 
   ctx.fillStyle = "rgba(255, 68, 85, 0.12)";
   ctx.fillRect(padX, y2, drawW, barH);
-  const gradAnn = ctx.createLinearGradient(padX, 0, padX + wAnn, 0);
+  const gradAnn = ctx.createLinearGradient(padX, 0, padX + Math.max(4, wAnn), 0);
   gradAnn.addColorStop(0, "#b02030");
-  gradAnn.addColorStop(1, "var(--color-crimson)");
+  gradAnn.addColorStop(1, "#ff4455");
   ctx.fillStyle = gradAnn;
   ctx.fillRect(padX, y2, wAnn, barH);
-  ctx.strokeStyle = "var(--color-crimson)";
+  ctx.strokeStyle = "#ff4455";
   ctx.lineWidth = 1.5;
   ctx.strokeRect(padX, y2, wAnn, barH);
 
   ctx.fillStyle = "#fff";
   ctx.font = "bold 12px monospace";
-  ctx.fillText(`${annVal.toFixed(2)} mJ`, padX + drawW - 65, y2 + 22);
+  ctx.fillText(`${annVal.toFixed(2)} mJ`, padX + drawW - 72, y2 + 22);
 
-  // UPDATE DOM TEXT PILLS SAFELY
   setTxt("frameEnergyVal", `${snnVal.toFixed(2)} mJ`);
   setTxt("annEnergyVal", `${annVal.toFixed(2)} mJ`);
   const factor = (annVal / Math.max(0.01, snnVal)).toFixed(1);
-  setTxt("savingsFactorVal", `${factor}x`);
+  setTxt("savingsFactorVal", `${factor}×`);
 }
 
-// ── Live Scrolling Power Waveform Renderer (Recon & System Power Card) ───────
-function drawLivePowerWaveform(canvasId, snnHist, yoloHist, showDual) {
-  const canvas = getEl(canvasId);
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  const w = canvas.width;
-  const h = canvas.height;
-
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = "#06090e";
-  ctx.fillRect(0, 0, w, h);
-
-  // Subtle tactical grid lines
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
-  ctx.lineWidth = 1;
-  for (let i = 1; i <= 3; i++) {
-    const gy = (h / 4) * i;
-    ctx.beginPath();
-    ctx.moveTo(0, gy);
-    ctx.lineTo(w, gy);
-    ctx.stroke();
-  }
-  for (let j = 1; j <= 6; j++) {
-    const gx = (w / 7) * j;
-    ctx.beginPath();
-    ctx.moveTo(gx, 0);
-    ctx.lineTo(gx, h);
-    ctx.stroke();
-  }
-
-  const pts = snnHist && snnHist.length > 1 ? snnHist : [0.41, 0.43, 0.40, 0.42];
-  const n = pts.length;
-
-  // Map SNN range [0.30 .. 1.35 W] into visual vertical wave height so fluctuations are clearly visible
-  const mapSnnY = (val) => {
-    const norm = Math.max(0.05, Math.min(0.92, (val - 0.30) / 1.05));
-    return showDual ? h - norm * (h * 0.55) - 6 : h - norm * (h - 10) - 5;
-  };
-
-  if (showDual && yoloHist && yoloHist.length > 1) {
-    // Draw upper crimson YOLOv8-Nano dense power waveform
-    ctx.beginPath();
-    yoloHist.forEach((v, idx) => {
-      const x = (idx / Math.max(1, yoloHist.length - 1)) * (w - 8) + 4;
-      const normYolo = Math.max(0.72, Math.min(0.95, v / 10.5));
-      const y = h - normYolo * (h - 10) - 4;
-      if (idx === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.strokeStyle = "#ff4455";
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
-  }
-
-  // Draw glowing emerald SNN waveform area + line
-  ctx.beginPath();
-  let lastX = 4;
-  let lastY = h / 2;
-  pts.forEach((v, idx) => {
-    const x = (idx / Math.max(1, n - 1)) * (w - 10) + 4;
-    const y = mapSnnY(v);
-    lastX = x;
-    lastY = y;
-    if (idx === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.strokeStyle = "#00e5a0";
-  ctx.lineWidth = 2.0;
-  ctx.stroke();
-
-  // Fill gradient under SNN wave
-  ctx.lineTo(lastX, h);
-  ctx.lineTo(4, h);
-  ctx.closePath();
-  const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, "rgba(0, 229, 160, 0.32)");
-  grad.addColorStop(1, "rgba(0, 229, 160, 0.02)");
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // Pulsing live head dot at right edge
-  ctx.beginPath();
-  ctx.arc(lastX, lastY, 3.2, 0, Math.PI * 2);
-  ctx.fillStyle = "#00e5a0";
-  ctx.fill();
-}
-
-// ── 7. Real-Time Oscilloscope & Power Heartbeat Loop ─────────────────────────
-function startRealtimeMonitor() {
-  let tick = 0;
-  setInterval(() => {
-    tick += 1;
-    const hasResult = !!state.currentResult;
-    const isDetected = !!state.currentResult?.detected;
-    const baseLat = state.currentResult?.latency_ms || 16.2;
-    const jitter = (Math.random() - 0.5) * 1.4;
-    const currentLat = Math.max(12.0, parseFloat((baseLat + jitter).toFixed(1)));
-
-    state.latencyHistory.push(currentLat);
-    if (state.latencyHistory.length > 25) {
-      state.latencyHistory.shift();
-    }
-
-    // Event-Driven SNN Power Rail Telemetry:
-    // Low patrol ripple (~0.40W) when sector clear/idle, higher dynamic burst (~0.88W) when target locked
-    const basePwr = hasResult
-      ? (state.currentResult?.dynamic_energy?.power_snn_w ?? state.currentResult?.telemetry?.power_snn_w ?? (isDetected ? 0.88 : 0.42))
-      : 0.41;
-    const wave = Math.sin(tick * 0.75) * (isDetected ? 0.065 : 0.032) + Math.cos(tick * 1.35) * 0.025;
-    const pwrJitter = (Math.random() - 0.5) * (isDetected ? 0.08 : 0.04) + wave;
-    const liveSnnPwr = Math.max(0.34, parseFloat((basePwr + pwrJitter).toFixed(2)));
-
-    const baseAnnPwr = state.currentResult?.yolo_benchmark?.power_w ?? state.currentResult?.telemetry?.power_ann_w ?? 8.70;
-    const annWave = Math.sin(tick * 0.5) * 0.18 + (Math.random() - 0.5) * 0.28;
-    const liveAnnPwr = Math.max(7.80, parseFloat((baseAnnPwr + annWave).toFixed(2)));
-
-    // Push to live history buffers for oscilloscope traces
-    state.snnPowerHistory.push(liveSnnPwr);
-    if (state.snnPowerHistory.length > 32) state.snnPowerHistory.shift();
-    state.yoloPowerHistory.push(liveAnnPwr);
-    if (state.yoloPowerHistory.length > 32) state.yoloPowerHistory.shift();
-
-    // Animate dynamic progress bars in SYSTEM POWER CONSUMPTION card
-    const snnBarPct = Math.max(4, Math.min(35, (liveSnnPwr / 3.2) * 100));
-    const annBarPct = Math.max(75, Math.min(100, (liveAnnPwr / 10.0) * 100));
-    setStyle("pwrSnnBar", "width", `${snnBarPct.toFixed(1)}%`);
-    setStyle("pwrAnnBar", "width", `${annBarPct.toFixed(1)}%`);
-    setTxt("pwrRatioBadge", isDetected ? "Active Target Spike Burst" : "Event-Gated Standby Patrol");
-
-    // Keep hidden/telemetry IDs synced
-    setTxt("globalSnnPower", `${liveSnnPwr.toFixed(2)} W`);
-    setTxt("snnCardPower", `${liveSnnPwr.toFixed(2)} W`);
-    setTxt("reconPower", `${liveSnnPwr.toFixed(2)} W`);
-    setTxt("cmpSnnPower", `${liveSnnPwr.toFixed(2)} W`);
-    setTxt("hdrSnnPower", `${liveSnnPwr.toFixed(2)}W`);
-    setTxt("hdrYoloPower", `${liveAnnPwr.toFixed(2)}W`);
-    setTxt("pwrSnn", `${liveSnnPwr.toFixed(2)} W`);
-    setTxt("pwrAnn", `${liveAnnPwr.toFixed(2)} W`);
-
-    // Always render the live scrolling power graphs so fluctuations are visible in real time
-    drawLivePowerWaveform("reconPowerCanvas", state.snnPowerHistory, state.yoloPowerHistory, false);
-    drawLivePowerWaveform("sysPowerCardCanvas", state.snnPowerHistory, state.yoloPowerHistory, true);
-
-    if (state.activeView === "view-power") {
-      drawPowerTraceChart(state.snnPowerHistory, state.yoloPowerHistory);
-      drawLatencyOscilloscope(state.latencyHistory, state.yoloLatencyHistory);
-    }
-  }, 380);
-}
-
-// ── 8. Canvas: Layer-3 Spike Spectrogram ─────────────────────────────────────
+// ── 11. Canvas: Layer-3 Spike Spectrogram ────────────────────────────────────
 function renderSpectrogram(spec) {
   const canvas = getEl("specCanvas");
-  if (!canvas) return;
+  if (!canvas || !spec) return;
   const ctx = canvas.getContext("2d");
   const w = canvas.width;
   const h = canvas.height;
@@ -1644,7 +2848,7 @@ function onSpecHover(e) {
   }
 }
 
-// ── 9. Canvas: Population Rate Curve (t0 -> t15) ─────────────────────────────
+// ── 12. Canvas: Population Rate Curve (t0 -> t15) ────────────────────────────
 function drawRateCurve(rates) {
   const canvas = getEl("rateCanvas");
   if (!canvas) return;
@@ -1668,7 +2872,7 @@ function drawRateCurve(rates) {
   const maxVal = Math.max(0.1, ...rates);
 
   ctx.beginPath();
-  const stepW = drawW / (rates.length - 1);
+  const stepW = drawW / Math.max(1, rates.length - 1);
 
   rates.forEach((val, i) => {
     const x = padX + i * stepW;
@@ -1677,7 +2881,7 @@ function drawRateCurve(rates) {
     else ctx.lineTo(x, y);
   });
 
-  ctx.strokeStyle = "var(--color-cyan)";
+  ctx.strokeStyle = "#00d2ff";
   ctx.lineWidth = 2.5;
   ctx.stroke();
 
@@ -1697,15 +2901,89 @@ function drawRateCurve(rates) {
   ctx.fillText(`${maxVal.toFixed(2)}`, 6, padY + 10);
 }
 
-// ── 10. Battery Autonomy Calculator ──────────────────────────────────────────
+// ── 13. Battery Autonomy Calculator (Measured Rail Power) ────────────────────
 function updateBatteryAutonomy(mah) {
   const wh = (mah * 12.0) / 1000.0;
   setTxt("battCapText", `${mah} mAh (${wh.toFixed(1)} Wh)`);
 
-  const usableWh = wh * 0.85;
-  const snnHrs = (usableWh / 0.91).toFixed(1);
-  const annHrs = (usableWh / 8.70).toFixed(1);
+  const snnW = state.latestMeasuredSnnW;
+  const annW = state.latestMeasuredYoloW;
+  if (!Number.isFinite(snnW) || snnW <= 0 || !Number.isFinite(annW) || annW <= 0) {
+    setTxt("autoSnn", "-- hrs");
+    setTxt("autoAnn", "-- hrs");
+    setTxt("autoExtraHours", "Awaiting measured power");
+    return;
+  }
 
-  setTxt("autoSnn", `${snnHrs} hrs`);
-  setTxt("autoAnn", `${annHrs} hrs`);
+  const usableWh = wh * 0.85;
+  const snnHrs = usableWh / snnW;
+  const annHrs = usableWh / annW;
+  const delta = snnHrs - annHrs;
+
+  setTxt("autoSnn", `${snnHrs.toFixed(1)} hrs`);
+  setTxt("autoAnn", `${annHrs.toFixed(1)} hrs`);
+  setTxt(
+    "autoExtraHours",
+    delta >= 0
+      ? `+${delta.toFixed(1)} Extra Patrol Hours`
+      : `${delta.toFixed(1)} hrs Delta`
+  );
 }
+
+// ── Layout: keep canvas bitmaps / ECharts in sync with their CSS boxes ───────
+// Canvas bitmaps are resized to the rendered box (no stretched text) and the
+// matching chart is redrawn from real data; ECharts instances are resized
+// whenever their container changes size (tab switch, window resize, reflow).
+(function setupLayoutResizeObservers() {
+  if (typeof ResizeObserver === "undefined") return;
+
+  const redrawers = {
+    latencyCanvas: () => drawLatencyOscilloscope(state.latencyHistory, state.yoloLatencyHistory),
+    energyCanvas: () => drawDynamicEnergyChart(state.currentEnergy),
+    sysPowerCardCanvas: () => renderViewedPowerCharts(),
+    powerTraceCanvas: () => renderViewedPowerCharts(),
+    reconPowerCanvas: () => renderViewedPowerCharts(),
+    miniPowerFallbackCanvas: () => renderViewedPowerCharts(),
+  };
+
+  function observe() {
+    Object.keys(redrawers).forEach((id) => {
+      const canvas = document.getElementById(id);
+      if (!canvas || canvas.dataset.roBound) return;
+      canvas.dataset.roBound = "1";
+      let raf = 0;
+      new ResizeObserver(() => {
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(() => {
+          const w = Math.round(canvas.clientWidth);
+          const h = Math.round(canvas.clientHeight);
+          if (w < 8 || h < 8) return;
+          if (canvas.width === w && canvas.height === h) return;
+          canvas.width = w;
+          canvas.height = h;
+          try {
+            redrawers[id]();
+          } catch (err) {
+            console.warn("Canvas redraw failed:", id, err);
+          }
+        });
+      }).observe(canvas);
+    });
+
+    [["echartsPowerMain", "echartsMain"], ["echartsPowerMini", "echartsMini"]].forEach(([elId, key]) => {
+      const el = document.getElementById(elId);
+      if (!el || el.dataset.roBound) return;
+      el.dataset.roBound = "1";
+      new ResizeObserver(() => {
+        const inst = state[key];
+        if (inst && el.clientWidth > 8 && el.clientHeight > 8) inst.resize();
+      }).observe(el);
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", observe);
+  } else {
+    observe();
+  }
+})();

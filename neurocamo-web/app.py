@@ -15,18 +15,28 @@ Default: http://127.0.0.1:8080
 from __future__ import annotations
 
 import base64
+from collections import OrderedDict
 import glob
+import hashlib
+import json
 import math
 import os
+import select
+import socket
+import struct
 import sys
+import threading
 import time
 import traceback
 import urllib.request
+from urllib.parse import urlsplit
+import uuid
 
 import cv2
 import numpy as np
 import torch
 from flask import Flask, jsonify, request, send_file, send_from_directory, Response
+from werkzeug.serving import WSGIRequestHandler
 
 # Add project roots to path
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +49,7 @@ if NEUROCAMO_ROOT not in sys.path:
     sys.path.insert(0, NEUROCAMO_ROOT)
 
 from inference import ModelBundle, run_inference
+from power_monitor import PowerMonitor
 from ultralytics import YOLO
 
 HOST = os.environ.get("NEUROCAMO_HOST", "0.0.0.0")
@@ -70,6 +81,15 @@ BUNDLE = ModelBundle()
 print(f"  [READY] SNN running on {BUNDLE.info.accelerator} ({BUNDLE.info.device})")
 print(f"  [READY] Checkpoint: {os.path.basename(BUNDLE.info.checkpoint_path)}")
 
+# Warmup SNN once so first benchmark run reflects steady-state execution
+try:
+    _warm_bgr = np.zeros((128, 128, 3), dtype=np.uint8)
+    run_inference(BUNDLE, _warm_bgr, is_live=False)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+except Exception:
+    pass
+
 YOLO_PATH = os.path.join(NEUROCAMO_ROOT, "checkpoints", "yolov8n.pt")
 if not os.path.exists(YOLO_PATH):
     YOLO_PATH = os.path.join(PROJECT_ROOT, "yolov8n.pt")
@@ -79,23 +99,319 @@ try:
     # Warmup
     dummy = np.zeros((128, 128, 3), dtype=np.uint8)
     YOLO_MODEL(dummy, verbose=False, device=BUNDLE.device)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     print("  [READY] YOLOv8-Nano Baseline Model Loaded (Live Head-to-Head Active)")
 except Exception as e:
     YOLO_MODEL = None
     print(f"  [WARN] YOLOv8 could not be loaded: {e}")
+
+
+# ── RFC 6455 WebSocket Hub & Hardware Power Telemetry ───────────────────────
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+_MAX_WS_PAYLOAD = 1024 * 1024  # 1 MiB safety limit for incoming control/ping frames
+
+
+def _ws_encode_frame(opcode: int, payload: bytes = b"") -> bytes:
+    """Encode a single unmasked server->client RFC 6455 frame."""
+    header = bytearray([0x80 | (opcode & 0x0F)])
+    n = len(payload)
+    if n < 126:
+        header.append(n)
+    elif n <= 0xFFFF:
+        header.append(126)
+        header.extend(struct.pack("!H", n))
+    else:
+        header.append(127)
+        header.extend(struct.pack("!Q", n))
+    return bytes(header) + payload
+
+
+class _WSClient:
+    """Thread-safe connected WebSocket client socket wrapper."""
+
+    def __init__(self, conn: socket.socket) -> None:
+        self.conn = conn
+        self.lock = threading.Lock()
+        self.closed = False
+
+    def send_frame(self, opcode: int, payload: bytes = b"") -> bool:
+        frame = _ws_encode_frame(opcode, payload)
+        return self.send_raw(frame)
+
+    def send_raw(self, frame: bytes) -> bool:
+        with self.lock:
+            if self.closed:
+                return False
+            try:
+                self.conn.sendall(frame)
+                return True
+            except OSError:
+                self.closed = True
+                return False
+
+    def close(self) -> None:
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            try:
+                self.conn.sendall(_ws_encode_frame(0x8, struct.pack("!H", 1000)))
+            except OSError:
+                pass
+            try:
+                self.conn.close()
+            except OSError:
+                pass
+
+
+class WSClientHub:
+    """Broadcasts live telemetry events immediately to all connected /ws/power clients."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._clients: list[_WSClient] = []
+
+    def add(self, conn: socket.socket) -> _WSClient:
+        client = _WSClient(conn)
+        with self._lock:
+            self._clients.append(client)
+        return client
+
+    def remove(self, client: _WSClient) -> None:
+        client.closed = True
+        with self._lock:
+            self._clients = [c for c in self._clients if c is not client]
+
+    def client_count(self) -> int:
+        with self._lock:
+            return len(self._clients)
+
+    def broadcast(self, event: dict) -> None:
+        with self._lock:
+            clients = list(self._clients)
+        if not clients:
+            return
+        raw_json = json.dumps(sanitize_json(event), separators=(",", ":")).encode("utf-8")
+        frame = _ws_encode_frame(0x1, raw_json)
+        dead: list[_WSClient] = []
+        for client in clients:
+            if not client.send_raw(frame):
+                dead.append(client)
+        if dead:
+            with self._lock:
+                self._clients = [c for c in self._clients if c not in dead]
+
+    def send_to(self, client: _WSClient, event: dict) -> bool:
+        raw_json = json.dumps(sanitize_json(event), separators=(",", ":")).encode("utf-8")
+        return client.send_raw(_ws_encode_frame(0x1, raw_json))
+
+
+def _ws_recv_exact(conn: socket.socket, rx_buf: bytearray, n: int, client: _WSClient) -> bytes | None:
+    """Read exactly n bytes from pre-buffered bytes + raw socket without poisoning BufferedReader."""
+    while len(rx_buf) < n:
+        if client.closed:
+            return None
+        try:
+            ready, _, _ = select.select([conn], [], [], 1.0)
+            if not ready:
+                continue
+            chunk = conn.recv(4096)
+            if not chunk:
+                return None
+            rx_buf.extend(chunk)
+        except (TimeoutError, socket.timeout, BlockingIOError):
+            continue
+        except OSError:
+            return None
+    out = bytes(rx_buf[:n])
+    del rx_buf[:n]
+    return out
+
+
+def _ws_read_loop(conn: socket.socket, rx_buf: bytearray, client: _WSClient) -> None:
+    """Read RFC 6455 frames from client: answer Ping->Pong, handle Close, ignore Text."""
+    while not client.closed:
+        hdr = _ws_recv_exact(conn, rx_buf, 2, client)
+        if hdr is None:
+            break
+        b1, b2 = hdr[0], hdr[1]
+        opcode = b1 & 0x0F
+        masked = (b2 & 0x80) != 0
+        length = b2 & 0x7F
+
+        if length == 126:
+            ext = _ws_recv_exact(conn, rx_buf, 2, client)
+            if ext is None:
+                break
+            length = struct.unpack("!H", ext)[0]
+        elif length == 127:
+            ext = _ws_recv_exact(conn, rx_buf, 8, client)
+            if ext is None:
+                break
+            length = struct.unpack("!Q", ext)[0]
+
+        if length > _MAX_WS_PAYLOAD:
+            break
+
+        mask_key = _ws_recv_exact(conn, rx_buf, 4, client) if masked else None
+        if masked and mask_key is None:
+            break
+
+        payload = _ws_recv_exact(conn, rx_buf, length, client) if length > 0 else b""
+        if payload is None:
+            break
+
+        if masked and mask_key and payload:
+            payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
+        if opcode == 0x8:  # Close
+            try:
+                client.send_frame(0x8, payload[:2] if len(payload) >= 2 else b"")
+            except Exception:
+                pass
+            break
+        elif opcode == 0x9:  # Ping -> Pong
+            client.send_frame(0xA, payload)
+        elif opcode == 0xA:  # Pong
+            continue
+        elif opcode == 0x1:  # Text (optional client heartbeat)
+            txt = payload.decode("utf-8", errors="ignore").strip().lower()
+            if txt in ("ping", '{"type":"ping"}'):
+                WS_HUB.send_to(client, {"type": "pong", "ts": time.time()})
+
+
+class NeuroCamoRequestHandler(WSGIRequestHandler):
+    """Werkzeug handler supporting RFC 6455 WebSocket upgrade on /ws/power."""
+
+    _is_websocket: bool = False
+
+    def do_GET(self):  # type: ignore[override]
+        req_path = urlsplit(self.path).path
+        upgrade_hdr = (self.headers.get("Upgrade") or "").strip().lower()
+        if req_path == "/ws/power" and upgrade_hdr == "websocket":
+            self._handle_ws_power()
+            return
+        return self.run_wsgi()
+
+    def finish(self) -> None:
+        if self._is_websocket:
+            try:
+                self.connection.close()
+            except OSError:
+                pass
+            return
+        super().finish()
+
+    def _handle_ws_power(self) -> None:
+        ws_key = self.headers.get("Sec-WebSocket-Key")
+        if not ws_key:
+            self.send_error(400, "Missing Sec-WebSocket-Key")
+            return
+
+        accept = base64.b64encode(
+            hashlib.sha1((ws_key.strip() + _WS_GUID).encode("ascii")).digest()
+        ).decode("ascii")
+
+        resp_hdrs = (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n"
+            "\r\n"
+        ).encode("ascii")
+
+        self._is_websocket = True
+        self.close_connection = True
+        self.wfile.write(resp_hdrs)
+        self.wfile.flush()
+
+        # Drain any bytes already buffered in rfile before switching to raw socket recv()
+        rx_buf = bytearray()
+        try:
+            self.connection.setblocking(False)
+            pre = self.rfile.read1(8192)
+            if pre:
+                rx_buf.extend(pre)
+        except (BlockingIOError, OSError, AttributeError):
+            pass
+
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        self.connection.settimeout(5.0)
+
+        client = WS_HUB.add(self.connection)
+        try:
+            WS_HUB.send_to(
+                client,
+                {
+                    "type": "hello",
+                    "endpoint": "/ws/power",
+                    "capabilities": POWER_MONITOR.get_capabilities(),
+                    "active_session": POWER_MONITOR.get_active_session_info(),
+                    "latest": POWER_MONITOR.read_live(),
+                },
+            )
+            _ws_read_loop(self.connection, rx_buf, client)
+        finally:
+            WS_HUB.remove(client)
+            client.close()
+
+
+WS_HUB = WSClientHub()
+POWER_MONITOR = PowerMonitor(interval_s=0.15, on_event=WS_HUB.broadcast)
+_pm_caps = POWER_MONITOR.get_capabilities()
+print(
+    f"  [READY] Power Telemetry: {_pm_caps['source']} "
+    f"({'ESTIMATED' if _pm_caps['is_estimated'] else 'MEASURED HARDWARE'}) "
+    f"[{_pm_caps['sensor_detail']}]"
+)
 print("=" * 68)
 
+MAX_SESSIONS = 50
+_session_lock = threading.Lock()
+SESSION_STORE: OrderedDict[str, dict] = OrderedDict()
+_benchmark_lock = threading.Lock()
 
-@app.after_request
-def no_store(resp):
-    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    resp.headers["Pragma"] = "no-cache"
-    return resp
+
+def _store_session(record: dict) -> None:
+    sid = record["summary"]["session_id"]
+    with _session_lock:
+        SESSION_STORE[sid] = record
+        SESSION_STORE.move_to_end(sid, last=False)
+        while len(SESSION_STORE) > MAX_SESSIONS:
+            SESSION_STORE.popitem(last=True)
+
+
+def _list_session_summaries() -> list[dict]:
+    with _session_lock:
+        return [rec["summary"] for rec in SESSION_STORE.values()]
+
+
+def _get_session_record(session_id: str) -> dict | None:
+    with _session_lock:
+        return SESSION_STORE.get(session_id)
 
 
 @app.get("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
+
+
+@app.route("/ws/power")
+def ws_power_http_fallback():
+    return (
+        jsonify(
+            {
+                "error": "WebSocket upgrade required (connect via ws://.../ws/power)",
+                "endpoint": "/ws/power",
+                "capabilities": POWER_MONITOR.get_capabilities(),
+            }
+        ),
+        426,
+    )
 
 
 def sanitize_json(obj):
@@ -131,8 +447,40 @@ def status():
             "head": i.head,
             "defaulted_keys": i.defaulted_keys or [],
             "unexpected_keys": i.unexpected_keys or [],
+            "power_monitor": POWER_MONITOR.get_capabilities(),
+            "ws_clients": WS_HUB.client_count(),
         }
     )
+
+
+@app.get("/api/power/live")
+def api_power_live():
+    return jsonify(sanitize_json(POWER_MONITOR.read_live()))
+
+
+@app.get("/api/sessions")
+def api_list_sessions():
+    active = POWER_MONITOR.get_active_session_info()
+    summaries = _list_session_summaries()
+    return jsonify(
+        sanitize_json(
+            {
+                "sessions": summaries,
+                "count": len(summaries),
+                "active_session_id": active["session_id"] if active else None,
+            }
+        )
+    )
+
+
+@app.get("/api/sessions/<session_id>")
+def api_get_session(session_id: str):
+    rec = _get_session_record(session_id)
+    if rec is None:
+        return jsonify({"error": f"Session not found: {session_id}"}), 404
+    payload = dict(rec["summary"])
+    payload["samples"] = rec["samples"]
+    return jsonify(sanitize_json(payload))
 
 
 # ── Curated Sample Gallery ───────────────────────────────────────────────────
@@ -228,24 +576,27 @@ def apply_environmental_filter(bgr: np.ndarray, env_filter: str) -> np.ndarray:
     return bgr
 
 
-def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: float = 0.15, env_filter: str = "normal", is_live: bool = False, stream_quality: str = "high"):
+def _sync_cuda() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _quality_params(stream_quality: str) -> tuple[int, int]:
+    sq = (stream_quality or "high").lower()
+    if sq in ("1080p", "fhd"):
+        return 1920, 85
+    if sq == "fast":
+        return 424, 50
+    if sq == "medium":
+        return 480, 65
+    return 640, 80
+
+
+def _prepare_frame(bgr: np.ndarray, env_filter: str, stream_quality: str) -> tuple[np.ndarray, str, int]:
     global RAW_UNFILTERED_BGR, LAST_BGR
     h, w = bgr.shape[:2]
     long_edge = max(h, w)
-    sq = (stream_quality or "high").lower()
-    if sq in ("1080p", "fhd"):
-        max_edge = 1920
-        jpeg_qual = 85
-    elif sq == "fast":
-        max_edge = 424
-        jpeg_qual = 50
-    elif sq == "medium":
-        max_edge = 480
-        jpeg_qual = 65
-    else:  # "high"
-        max_edge = 640
-        jpeg_qual = 80
-
+    max_edge, jpeg_qual = _quality_params(stream_quality)
     if long_edge > max_edge:
         s = float(max_edge) / long_edge
         bgr = cv2.resize(bgr, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
@@ -254,12 +605,12 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
     bgr = apply_environmental_filter(bgr, env_filter)
     LAST_BGR = bgr.copy()
 
-    # Encode input image as base64 JPEG
     ok_in, buf_in = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
     input_b64 = "data:image/jpeg;base64," + base64.b64encode(buf_in).decode("ascii") if ok_in else ""
+    return bgr, input_b64, jpeg_qual
 
-    out = run_inference(BUNDLE, bgr, is_live=is_live)
 
+def _attach_visual_artifacts(out: dict, bgr: np.ndarray, input_b64: str, filename: str, env_filter: str, jpeg_qual: int, is_live: bool) -> None:
     annotated = out.pop("annotated_rgb")
     ok_out, buf_out = cv2.imencode(".jpg", cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
     if not ok_out:
@@ -270,84 +621,90 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
     out["filename"] = filename
     out["env_filter"] = env_filter
 
-    # In live mode: skip 2 heavy extra JPEG compressions to give maximum FPS on Jetson Xavier NX
+    # In live mode: skip extra JPEG compressions & temporal step sweeps to maximize FPS on Jetson Xavier NX
     if is_live:
         out["saliency_png"] = out["result_png"]
         out["camo_mask_png"] = out["result_png"]
-    else:
-        # Generate Tactical Saliency Heatmap (JET Colormap) and Camo Mask Overlays
-        try:
-            h_orig, w_orig = bgr.shape[:2]
-            if out.get("heatmap") and out["heatmap"].get("data"):
-                h_raw = np.array(out["heatmap"]["data"], dtype=np.uint8).reshape((16, 16))
-                h_full = cv2.resize(h_raw, (w_orig, h_orig), interpolation=cv2.INTER_CUBIC)
-                
-                # Saliency False-Color Heatmap (JET)
-                heat_color = cv2.applyColorMap(h_full, cv2.COLORMAP_JET)
-                saliency_bgr = cv2.addWeighted(bgr, 0.42, heat_color, 0.58, 0)
-                ok_sal, buf_sal = cv2.imencode(".jpg", saliency_bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
-                out["saliency_png"] = "data:image/jpeg;base64," + base64.b64encode(buf_sal).decode("ascii") if ok_sal else out["result_png"]
+        out["temporal_evolution"] = []
+        return
 
-                # Camo Mask (Binary thresholded attention mask)
-                _, mask_bin = cv2.threshold(h_full, 80, 255, cv2.THRESH_BINARY)
-                camo_mask_bgr = bgr.copy()
-                camo_mask_bgr[mask_bin > 0] = cv2.addWeighted(camo_mask_bgr[mask_bin > 0], 0.3, np.full_like(camo_mask_bgr[mask_bin > 0], (0, 230, 160)), 0.7, 0)
-                ok_msk, buf_msk = cv2.imencode(".jpg", camo_mask_bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
-                out["camo_mask_png"] = "data:image/jpeg;base64," + base64.b64encode(buf_msk).decode("ascii") if ok_msk else out["result_png"]
-            else:
-                out["saliency_png"] = out["result_png"]
-                out["camo_mask_png"] = out["result_png"]
-        except Exception as e_ov:
-            print(f"Overlay generation warning: {e_ov}")
+    try:
+        h_orig, w_orig = bgr.shape[:2]
+        if out.get("heatmap") and out["heatmap"].get("data"):
+            h_raw = np.array(out["heatmap"]["data"], dtype=np.uint8).reshape((16, 16))
+            h_full = cv2.resize(h_raw, (w_orig, h_orig), interpolation=cv2.INTER_CUBIC)
+
+            heat_color = cv2.applyColorMap(h_full, cv2.COLORMAP_JET)
+            saliency_bgr = cv2.addWeighted(bgr, 0.42, heat_color, 0.58, 0)
+            ok_sal, buf_sal = cv2.imencode(".jpg", saliency_bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
+            out["saliency_png"] = "data:image/jpeg;base64," + base64.b64encode(buf_sal).decode("ascii") if ok_sal else out["result_png"]
+
+            _, mask_bin = cv2.threshold(h_full, 80, 255, cv2.THRESH_BINARY)
+            camo_mask_bgr = bgr.copy()
+            camo_mask_bgr[mask_bin > 0] = cv2.addWeighted(
+                camo_mask_bgr[mask_bin > 0],
+                0.3,
+                np.full_like(camo_mask_bgr[mask_bin > 0], (0, 230, 160)),
+                0.7,
+                0,
+            )
+            ok_msk, buf_msk = cv2.imencode(".jpg", camo_mask_bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_qual])
+            out["camo_mask_png"] = "data:image/jpeg;base64," + base64.b64encode(buf_msk).decode("ascii") if ok_msk else out["result_png"]
+        else:
             out["saliency_png"] = out["result_png"]
             out["camo_mask_png"] = out["result_png"]
+    except Exception as e_ov:
+        print(f"Overlay generation warning: {e_ov}")
+        out["saliency_png"] = out["result_png"]
+        out["camo_mask_png"] = out["result_png"]
 
-    # Temporal Poisson Spike Evolution across T=1..16 timesteps (bypassed in live mode for maximum FPS)
-    if is_live:
+    try:
+        resized_t = cv2.resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), (128, 128)).astype(np.float32) / 255.0
+        tensor_t = torch.from_numpy(resized_t).permute(2, 0, 1).unsqueeze(0).to(BUNDLE.device)
+        temporal_steps = []
+        with torch.no_grad():
+            spk_full = BUNDLE.encoder(tensor_t)
+            spk_l3, mem_l3, _ = BUNDLE.model.backbone(spk_full)
+            for t_step in range(1, 17):
+                sub_spk = spk_l3[:t_step]
+                fused = BUNDLE.model.asab(sub_spk, mem_l3 * (t_step / 16.0))
+                hm, off, wh = BUNDLE.model.head(fused)
+                bbox, conf_t = BUNDLE.model.decode_mask(hm)
+                heat_t = torch.sigmoid(hm)[0, 0].cpu().numpy()
+                temporal_steps.append({
+                    "t": t_step,
+                    "conf": round(float(conf_t[0].item()), 3),
+                    "spikes": int(sub_spk.sum().item()),
+                    "peak": round(float(heat_t.max()), 3),
+                })
+        out["temporal_evolution"] = temporal_steps
+    except Exception as te:
+        print(f"Temporal evolution calculation warning: {te}")
         out["temporal_evolution"] = []
-    else:
-        try:
-            resized_t = cv2.resize(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), (128, 128)).astype(np.float32) / 255.0
-            tensor_t = torch.from_numpy(resized_t).permute(2, 0, 1).unsqueeze(0).to(BUNDLE.device)
-            temporal_steps = []
-            with torch.no_grad():
-                spk_full = BUNDLE.encoder(tensor_t)
-                spk_l3, mem_l3, _ = BUNDLE.model.backbone(spk_full)
-                for t_step in range(1, 17):
-                    sub_spk = spk_l3[:t_step]
-                    fused = BUNDLE.model.asab(sub_spk, mem_l3 * (t_step / 16.0))
-                    hm, off, wh = BUNDLE.model.head(fused)
-                    bbox, conf_t = BUNDLE.model.decode_mask(hm)
-                    heat_t = torch.sigmoid(hm)[0, 0].cpu().numpy()
-                    temporal_steps.append({
-                        "t": t_step,
-                        "conf": round(float(conf_t[0].item()), 3),
-                        "spikes": int(sub_spk.sum().item()),
-                        "peak": round(float(heat_t.max()), 3)
-                    })
-            out["temporal_evolution"] = temporal_steps
-        except Exception as te:
-            print(f"Temporal evolution calculation warning: {te}")
-            out["temporal_evolution"] = []
 
-    # Calculate UGV Telemetry
+
+def _attach_telemetry_and_energy(
+    out: dict,
+    snn_power_w: float,
+    yolo_power_w: float | None,
+    measured_snn_mj: float | None,
+    measured_yolo_mj: float | None,
+    source: str,
+    is_estimated: bool,
+) -> None:
     bbox = out.get("bbox_norm", [0.5, 0.5, 0.2, 0.2])
     xc, yc, bw, bh = bbox
     detected = out.get("verdict") in ("DETECTED", "POSSIBLE TARGET")
     out["detected"] = detected
 
     if detected:
-        bearing_deg = (xc - 0.5) * 60.0  # Azimuth: FOV = 60 degrees
-        elevation_deg = (0.5 - yc) * 45.0 # Elevation: FOV = 45 degrees
-        
-        # Tactical Pinpoint Standoff Range Estimation (Optical pinhole approximation)
+        bearing_deg = (xc - 0.5) * 60.0
+        elevation_deg = (0.5 - yc) * 45.0
         apparent_dim = max(0.05, max(bw, bh))
-        standoff_range_m = round(float(28.0 / apparent_dim), 1) # Estimated distance in meters
+        standoff_range_m = round(float(28.0 / apparent_dim), 1)
         target_footprint_m2 = round(float((bw * standoff_range_m) * (bh * standoff_range_m) * 0.75), 2)
 
-        # Steering differential
-        kp = 1.2
-        turn = int(bearing_deg * kp)
+        turn = int(bearing_deg * 1.2)
         m1 = max(100, min(255, 230 - turn))
         m2 = max(100, min(255, 230 + turn))
         if abs(bearing_deg) < 5.0:
@@ -356,7 +713,7 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
             cmd = f"STEER LEFT ({-bearing_deg:.1f} deg)"
         else:
             cmd = f"STEER RIGHT ({bearing_deg:.1f} deg)"
-            
+
         stanag_packet = f"$STANAG,TRT:01,AZ:{bearing_deg:+.2f},EL:{elevation_deg:+.2f},RNG:{standoff_range_m}m,STAT:LOCK*7E"
         packet = f"$UGV,SEQ:0482,CMD:ENGAGE,M1:{m1},M2:{m2},BRG:{bearing_deg:+.1f},RNG:{standoff_range_m}m*4B"
     else:
@@ -367,69 +724,44 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
         m1, m2 = 0, 0
         cmd = "PATROL SCAN (SECTOR CLEAR)"
         stanag_packet = "$STANAG,TRT:01,AZ:+0.00,EL:+0.00,RNG:0.0m,STAT:SCAN*1A"
-        packet = "$UGV,SEQ:0482,CMD:PATROL,M1:0,M2:0,BRG:+0.0,PWR:0.35W*1A"
+        packet = f"$UGV,SEQ:0482,CMD:PATROL,M1:0,M2:0,BRG:+0.0,PWR:{snn_power_w:.2f}W*1A"
 
-    # Dynamic Frame-Specific Neuromorphic Energy (Horowitz CMOS 45nm / 28nm benchmark)
+    # Theoretical Horowitz 45nm CMOS synaptic energy computed from real firing sparsity (no random/fake power)
     total_synapses = 820417 * 16
     meas_sparsity = float(out.get("sparsity", 0.78))
-    tex_score = float(out.get("texture_score", 300.0))
-    t_snn_ms = float(out.get("latency_ms", 16.1))
     spec_info = out.get("spectrogram") or {}
     l3_mean_rate = float(spec_info.get("mean_rate", 0.12))
     active_ch = int(spec_info.get("active_channels", 64))
     ch_ratio = active_ch / 128.0
     conf_val = float(out.get("confidence", 0.0))
 
-    # Event-Driven Neuromorphic Gating:
-    # When no camouflage target is present (SECTOR CLEAR), deep synaptic cascades early-exit / sleep.
-    raw_firing = (
-        0.35 * (1.0 - meas_sparsity)
-        + 0.35 * min(1.0, l3_mean_rate * 2.8)
-        + 0.30 * ch_ratio
-    )
+    raw_firing = 0.35 * (1.0 - meas_sparsity) + 0.35 * min(1.0, l3_mean_rate * 2.8) + 0.30 * ch_ratio
     gate_factor = (0.55 + 0.45 * conf_val) if detected else (0.12 + 0.25 * conf_val)
     effective_firing = raw_firing * gate_factor
     active_spikes = int(total_synapses * max(0.02, min(0.65, effective_firing)))
 
-    # Read real Linux/Jetson thermal or CPU load modulation if running on Jetson
-    hw_mod = 0.0
-    try:
-        if os.path.exists("/proc/loadavg"):
-            with open("/proc/loadavg", "r") as f_ld:
-                load_1m = float(f_ld.read().split()[0])
-                hw_mod = min(0.05, (load_1m % 1.0) * 0.04)
-    except Exception:
-        pass
-    rail_ripple = float(np.random.uniform(-0.025, 0.025)) + hw_mod
-
-    if detected:
-        # Active Camouflage Lock: Full 16-step LIF localization (0.76 W - 1.12 W)
-        tex_component = min(0.14, float(np.log1p(max(1.0, tex_score))) / 65.0)
-        snn_pwr = 0.58 + (effective_firing * 0.48) + (conf_val * 0.16) + tex_component + rail_ripple
-        snn_pwr = round(float(max(0.72, min(1.18, snn_pwr))), 2)
-    else:
-        # Non-Camouflage / Sector Clear: Event-gated low-power patrol mode (0.38 W - 0.51 W)
-        tex_component = min(0.05, float(np.log1p(max(1.0, tex_score))) / 180.0)
-        snn_pwr = 0.36 + (effective_firing * 0.35) + tex_component + rail_ripple
-        snn_pwr = round(float(max(0.36, min(0.52, snn_pwr))), 2)
-
-    # 0.9 pJ per active synaptic spike in mJ
-    snn_energy_mj = (active_spikes * 0.9) / 1e6
-    snn_step_energy_mj = snn_energy_mj / 16.0
-    
-    # Conventional dense CNN energy at full precision MAC (4.6 pJ) - always 100% dense regardless of target
-    ann_energy_mj = (total_synapses * 4.6) / 1e6
-    reduction = round(ann_energy_mj / max(1e-5, snn_energy_mj), 1)
+    snn_theo_mj = (active_spikes * 0.9) / 1e6
+    snn_step_theo_mj = snn_theo_mj / 16.0
+    ann_theo_mj = (total_synapses * 4.6) / 1e6
+    reduction = round(ann_theo_mj / max(1e-5, snn_theo_mj), 1)
 
     out["dynamic_energy"] = {
         "active_synaptic_spikes": active_spikes,
         "silent_synapses": total_synapses - active_spikes,
-        "snn_energy_mj": round(snn_energy_mj, 3),
-        "snn_step_energy_mj": round(snn_step_energy_mj, 3),
-        "ann_energy_mj": round(ann_energy_mj, 3),
+        "snn_energy_mj": round(snn_theo_mj, 3),
+        "snn_step_energy_mj": round(snn_step_theo_mj, 3),
+        "ann_energy_mj": round(ann_theo_mj, 3),
         "energy_reduction_factor": f"{reduction}x",
         "measured_sparsity_pct": round(meas_sparsity * 100.0, 1),
-        "power_snn_w": snn_pwr,
+        "power_snn_w": round(float(snn_power_w), 3),
+        "theoretical_horowitz_snn_energy_mj": round(snn_theo_mj, 3),
+        "theoretical_horowitz_ann_energy_mj": round(ann_theo_mj, 3),
+        "measured_snn_energy_mj": round(float(measured_snn_mj), 3) if measured_snn_mj is not None else None,
+        "measured_yolo_energy_mj": round(float(measured_yolo_mj), 3) if measured_yolo_mj is not None else None,
+        "measured_snn_avg_watts": round(float(snn_power_w), 3),
+        "measured_yolo_avg_watts": round(float(yolo_power_w), 3) if yolo_power_w is not None else None,
+        "source": source,
+        "is_estimated": is_estimated,
     }
 
     out["telemetry"] = {
@@ -443,111 +775,299 @@ def _process_bgr(bgr: np.ndarray, filename: str = "input_frame", yolo_conf: floa
         "command": cmd,
         "packet": packet,
         "stanag_packet": stanag_packet,
-        "power_snn_w": snn_pwr,
-        "power_ann_w": 8.70,
+        "power_snn_w": round(float(snn_power_w), 3),
+        "power_ann_w": round(float(yolo_power_w), 3) if yolo_power_w is not None else None,
+        "source": source,
+        "is_estimated": is_estimated,
     }
 
-    # Live YOLOv8-Nano Baseline Comparison (bypassed during live streaming for speed)
+
+def _run_yolo_single(bgr: np.ndarray, yolo_conf: float, power_w: float | None, measured_energy_mj: float | None, source: str, is_estimated: bool) -> dict:
+    _sync_cuda()
+    t_y_start = time.perf_counter()
+    y_res = YOLO_MODEL(bgr, conf=yolo_conf, verbose=False, device=BUNDLE.device)[0]
+    _sync_cuda()
+    t_yolo_ms = (time.perf_counter() - t_y_start) * 1000.0
+
+    yolo_bgr = y_res.plot()
+    n_boxes = len(y_res.boxes)
+    detections_list = []
+    for b in y_res.boxes:
+        c_id = int(b.cls[0])
+        c_conf = float(b.conf[0])
+        c_name = YOLO_MODEL.names[c_id]
+        detections_list.append({
+            "class": c_name,
+            "conf": round(c_conf * 100.0, 1),
+            "xyxy": [round(float(v), 1) for v in b.xyxy[0].tolist()],
+        })
+
+    if n_boxes == 0:
+        cv2.putText(
+            yolo_bgr,
+            f"YOLOv8-Nano: 0 OBJECTS (CONF >= {int(yolo_conf * 100)}%)",
+            (20, 45),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 70, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            yolo_bgr,
+            "Standard COCO texture anchors missed camouflaged target",
+            (20, 75),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (180, 180, 200),
+            1,
+            cv2.LINE_AA,
+        )
+    else:
+        cv2.putText(
+            yolo_bgr,
+            f"YOLOv8: {n_boxes} OBJECT(S) DETECTED",
+            (20, 45),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 200, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+    ok_yolo, buf_yolo = cv2.imencode(".jpg", yolo_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    yolo_b64 = "data:image/jpeg;base64," + base64.b64encode(buf_yolo).decode("ascii") if ok_yolo else ""
+
+    w_orig, h_orig = bgr.shape[1], bgr.shape[0]
+    yolo_gflops = round(float(8.70 * ((w_orig * h_orig) / (640.0 * 640.0))), 2)
+    yolo_gflops = max(4.2, min(14.8, yolo_gflops))
+    yolo_theo_mj = round(float((yolo_gflops * 1e9 * 4.6 * 1e-12) * 1000.0), 2)
+
+    return {
+        "available": True,
+        "conf_threshold": yolo_conf,
+        "boxes_count": n_boxes,
+        "detections": detections_list,
+        "latency_ms": round(t_yolo_ms, 1),
+        "power_w": round(float(power_w), 3) if power_w is not None else None,
+        "energy_mj": yolo_theo_mj,
+        "theoretical_energy_mj": yolo_theo_mj,
+        "measured_energy_mj": round(float(measured_energy_mj), 3) if measured_energy_mj is not None else None,
+        "gflops": yolo_gflops,
+        "status": f"{n_boxes} OBJECT(S) DETECTED" if n_boxes > 0 else f"0 OBJECTS (CONF >= {int(yolo_conf * 100)}%)",
+        "result_png": yolo_b64,
+        "source": source,
+        "is_estimated": is_estimated,
+    }
+
+
+def _process_bgr(
+    bgr: np.ndarray,
+    filename: str = "input_frame",
+    yolo_conf: float = 0.15,
+    env_filter: str = "normal",
+    is_live: bool = False,
+    stream_quality: str = "high",
+):
+    """Fast single-pass processing for live streams, webcam frames, and non-benchmark re-evals."""
+    bgr_proc, input_b64, jpeg_qual = _prepare_frame(bgr, env_filter, stream_quality)
+    _sync_cuda()
+    out = run_inference(BUNDLE, bgr_proc, is_live=is_live)
+    _sync_cuda()
+    _attach_visual_artifacts(out, bgr_proc, input_b64, filename, env_filter, jpeg_qual, is_live=is_live)
+
+    live_snap = POWER_MONITOR.read_live()
+    snn_pwr = float(live_snap["watts"])
+    src = str(live_snap["source"])
+    is_est = bool(live_snap["is_estimated"])
+
     yolo_data = {
         "available": False,
         "conf_threshold": yolo_conf,
         "boxes_count": 0,
         "detections": [],
         "latency_ms": 0.0,
-        "power_w": 8.70,
-        "energy_mj": 40.02,
+        "power_w": None,
+        "energy_mj": None,
+        "theoretical_energy_mj": None,
+        "measured_energy_mj": None,
         "gflops": 8.70,
         "status": "YOLOv8 STANDBY (ACTIVE IN COMPARE VIEW)" if is_live else "YOLOv8 MODEL UNAVAILABLE",
         "result_png": "",
+        "source": src,
+        "is_estimated": is_est,
     }
+    yolo_pwr = None
     if not is_live and YOLO_MODEL is not None:
         try:
-            t_y_start = time.perf_counter()
-            y_res = YOLO_MODEL(bgr, conf=yolo_conf, verbose=False, device=BUNDLE.device)[0]
-            t_yolo_ms = (time.perf_counter() - t_y_start) * 1000.0
-
-            yolo_bgr = y_res.plot()
-            n_boxes = len(y_res.boxes)
-            detections_list = []
-            for b in y_res.boxes:
-                c_id = int(b.cls[0])
-                c_conf = float(b.conf[0])
-                c_name = YOLO_MODEL.names[c_id]
-                detections_list.append({
-                    "class": c_name,
-                    "conf": round(c_conf * 100.0, 1),
-                    "xyxy": [round(float(v), 1) for v in b.xyxy[0].tolist()]
-                })
-
-            if n_boxes == 0:
-                cv2.putText(
-                    yolo_bgr,
-                    f"YOLOv8-Nano: 0 OBJECTS (CONF >= {int(yolo_conf * 100)}%)",
-                    (20, 45),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (0, 70, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-                cv2.putText(
-                    yolo_bgr,
-                    "Standard COCO texture anchors missed camouflaged target",
-                    (20, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.48,
-                    (180, 180, 200),
-                    1,
-                    cv2.LINE_AA,
-                )
-            else:
-                top_obj = detections_list[0]
-                status_txt = f"YOLOv8: {n_boxes} OBJECT(S) DETECTED"
-                cv2.putText(
-                    yolo_bgr,
-                    status_txt,
-                    (20, 45),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (0, 200, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-
-            ok_yolo, buf_yolo = cv2.imencode(".jpg", yolo_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            yolo_b64 = "data:image/jpeg;base64," + base64.b64encode(buf_yolo).decode("ascii") if ok_yolo else ""
-
-            # Dynamic YOLO Jetson Hardware Computation
-            w_orig, h_orig = bgr.shape[1], bgr.shape[0]
-            yolo_gflops = round(float(8.70 * ((w_orig * h_orig) / (640.0 * 640.0))), 2)
-            yolo_gflops = max(4.2, min(14.8, yolo_gflops))
-
-            # Jetson Nano Dense Power: baseline 7.60 W + tensor core utilization + box overhead
-            yolo_pwr = round(7.60 + min(1.60, (t_yolo_ms * 0.022)) + (0.12 * min(n_boxes, 4)), 2)
-
-            # Frame energy (mJ) from Horowitz 45nm standard: 4.6 pJ per float MAC
-            yolo_energy_mj = round(float((yolo_gflops * 1e9 * 4.6 * 1e-12) * 1000.0), 2)
-
-            out["telemetry"]["power_ann_w"] = yolo_pwr
-
-            yolo_data = {
-                "available": True,
-                "conf_threshold": yolo_conf,
-                "boxes_count": n_boxes,
-                "detections": detections_list,
-                "latency_ms": round(t_yolo_ms, 1),
-                "power_w": yolo_pwr,
-                "energy_mj": yolo_energy_mj,
-                "gflops": yolo_gflops,
-                "status": f"{n_boxes} OBJECT(S) DETECTED" if n_boxes > 0 else f"0 OBJECTS (CONF >= {int(yolo_conf * 100)}%)",
-                "result_png": yolo_b64,
-            }
+            yolo_data = _run_yolo_single(bgr_proc, yolo_conf, None, None, src, is_est)
+            after_yolo = POWER_MONITOR.read_live()
+            yolo_pwr = float(after_yolo["watts"])
+            yolo_data["power_w"] = round(yolo_pwr, 3)
         except Exception as ey:
             print(f"YOLO comparison error: {ey}")
             yolo_data["error"] = str(ey)
 
+    _attach_telemetry_and_energy(out, snn_pwr, yolo_pwr, None, None, src, is_est)
     out["yolo_benchmark"] = yolo_data
+    return out
 
+
+def _run_benchmark_pipeline(
+    bgr: np.ndarray,
+    filename: str = "uploaded_image",
+    yolo_conf: float = 0.15,
+    env_filter: str = "normal",
+    stream_quality: str = "high",
+) -> dict:
+    """Serialized 5-phase live hardware benchmark:
+    idle_baseline (0.8s) -> snn_inference (>=1.1s, >=3 runs) -> cooldown (0.5s) ->
+    yolo_inference (>=1.1s, >=3 runs) -> post_idle (0.4s), streaming samples live via /ws/power.
+    """
+    bgr_proc, input_b64, jpeg_qual = _prepare_frame(bgr, env_filter, stream_quality)
+    session_id = f"bench_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+
+    with _benchmark_lock:
+        try:
+            # Phase 1: Idle Baseline
+            POWER_MONITOR.start_session(session_id, image_name=filename, initial_phase="idle_baseline")
+            time.sleep(0.8)
+
+            # Phase 2: NeuroCamo SNN Inference (Run 1 captures UI payload; subsequent runs sustain hardware load)
+            POWER_MONITOR.set_phase("snn_inference")
+            t_snn_phase = time.perf_counter()
+            _sync_cuda()
+            t0 = time.perf_counter()
+            out = run_inference(BUNDLE, bgr_proc, is_live=False)
+            _sync_cuda()
+            snn_latencies: list[float] = [(time.perf_counter() - t0) * 1000.0]
+
+            while (time.perf_counter() - t_snn_phase) < 1.1 or len(snn_latencies) < 3:
+                t_r = time.perf_counter()
+                run_inference(BUNDLE, bgr_proc, is_live=False)
+                _sync_cuda()
+                snn_latencies.append((time.perf_counter() - t_r) * 1000.0)
+
+            # Phase 3: Inter-model Cooldown Gap
+            POWER_MONITOR.set_phase("cooldown")
+            time.sleep(0.5)
+
+            # Phase 4: YOLOv8-Nano Inference
+            POWER_MONITOR.set_phase("yolo_inference")
+            t_yolo_phase = time.perf_counter()
+            yolo_latencies: list[float] = []
+            yolo_data: dict | None = None
+
+            if YOLO_MODEL is not None:
+                try:
+                    yolo_data = _run_yolo_single(bgr_proc, yolo_conf, None, None, "pending", False)
+                    yolo_latencies.append(float(yolo_data["latency_ms"]))
+                    while (time.perf_counter() - t_yolo_phase) < 1.1 or len(yolo_latencies) < 3:
+                        t_y = time.perf_counter()
+                        YOLO_MODEL(bgr_proc, conf=yolo_conf, verbose=False, device=BUNDLE.device)
+                        _sync_cuda()
+                        yolo_latencies.append((time.perf_counter() - t_y) * 1000.0)
+                except Exception as ey:
+                    print(f"YOLO benchmark error: {ey}")
+                    yolo_data = {
+                        "available": False,
+                        "conf_threshold": yolo_conf,
+                        "boxes_count": 0,
+                        "detections": [],
+                        "latency_ms": 0.0,
+                        "power_w": None,
+                        "energy_mj": None,
+                        "theoretical_energy_mj": None,
+                        "measured_energy_mj": None,
+                        "gflops": 8.70,
+                        "status": "YOLOv8 ERROR",
+                        "result_png": "",
+                        "error": str(ey),
+                    }
+            else:
+                time.sleep(0.3)
+
+            # Phase 5: Post-inference Idle Tail
+            POWER_MONITOR.set_phase("post_idle")
+            time.sleep(0.4)
+
+            snn_mean_lat = sum(snn_latencies) / len(snn_latencies)
+            yolo_mean_lat = (sum(yolo_latencies) / len(yolo_latencies)) if yolo_latencies else 0.0
+
+            session_record = POWER_MONITOR.stop_session(
+                phase_run_stats={
+                    "snn_inference": {
+                        "runs": len(snn_latencies),
+                        "mean_latency_ms": snn_mean_lat,
+                    },
+                    "yolo_inference": {
+                        "runs": len(yolo_latencies),
+                        "mean_latency_ms": yolo_mean_lat,
+                    },
+                }
+            )
+            _store_session(session_record)
+            summary = session_record["summary"]
+            WS_HUB.broadcast(
+                {
+                    "type": "session_complete",
+                    "session_id": session_id,
+                    "summary": summary,
+                }
+            )
+        except Exception as exc:
+            POWER_MONITOR.abort_session()
+            WS_HUB.broadcast(
+                {
+                    "type": "error",
+                    "session_id": session_id,
+                    "message": str(exc),
+                }
+            )
+            raise
+
+    # Assemble complete UI response outside benchmark timing lock
+    _attach_visual_artifacts(out, bgr_proc, input_b64, filename, env_filter, jpeg_qual, is_live=False)
+
+    snn_phase = summary["phases"]["snn_inference"]
+    yolo_phase = summary["phases"]["yolo_inference"]
+    snn_avg_w = float(snn_phase["avg_watts"])
+    snn_epi_mj = float(snn_phase["energy_per_inference_mj"])
+    yolo_avg_w = float(yolo_phase["avg_watts"]) if yolo_phase["runs"] > 0 else None
+    yolo_epi_mj = float(yolo_phase["energy_per_inference_mj"]) if yolo_phase["runs"] > 0 else None
+    src = str(summary["source"])
+    is_est = bool(summary["is_estimated"])
+
+    out["latency_ms"] = round(float(snn_phase["mean_latency_ms"] or out.get("latency_ms", 0.0)), 1)
+    _attach_telemetry_and_energy(out, snn_avg_w, yolo_avg_w, snn_epi_mj, yolo_epi_mj, src, is_est)
+
+    if yolo_data is None:
+        yolo_data = {
+            "available": False,
+            "conf_threshold": yolo_conf,
+            "boxes_count": 0,
+            "detections": [],
+            "latency_ms": 0.0,
+            "power_w": None,
+            "energy_mj": None,
+            "theoretical_energy_mj": None,
+            "measured_energy_mj": None,
+            "gflops": 8.70,
+            "status": "YOLOv8 MODEL UNAVAILABLE",
+            "result_png": "",
+            "source": src,
+            "is_estimated": is_est,
+        }
+    else:
+        yolo_data["source"] = src
+        yolo_data["is_estimated"] = is_est
+        if yolo_phase["runs"] > 0:
+            yolo_data["latency_ms"] = round(float(yolo_phase["mean_latency_ms"]), 1)
+            yolo_data["power_w"] = round(float(yolo_avg_w), 3) if yolo_avg_w is not None else None
+            yolo_data["measured_energy_mj"] = round(float(yolo_epi_mj), 3) if yolo_epi_mj is not None else None
+
+    out["yolo_benchmark"] = yolo_data
+    out["benchmark_session"] = session_record
     return out
 
 
@@ -572,9 +1092,13 @@ def detect_sample(sample_id: str):
 
     yolo_conf = request.args.get("yolo_conf", 0.15, type=float)
     env_filter = request.args.get("env", "normal")
+    run_bench = str(request.args.get("benchmark", "1")).lower() not in ("0", "false", "no")
 
     try:
-        out = _process_bgr(bgr, target["file"], yolo_conf=yolo_conf, env_filter=env_filter)
+        if run_bench:
+            out = _run_benchmark_pipeline(bgr, target["file"], yolo_conf=yolo_conf, env_filter=env_filter)
+        else:
+            out = _process_bgr(bgr, target["file"], yolo_conf=yolo_conf, env_filter=env_filter)
         out["sample_info"] = target
         return jsonify(sanitize_json(out))
     except Exception as e:
@@ -583,6 +1107,7 @@ def detect_sample(sample_id: str):
 
 
 @app.route("/api/detect", methods=["POST"])
+@app.route("/api/benchmark/upload", methods=["POST"])
 def detect_upload():
     upload = request.files.get("image")
     if upload is None or not upload.filename:
@@ -604,9 +1129,26 @@ def detect_upload():
     env_filter = request.form.get("env_filter", request.form.get("env", request.args.get("env", "normal")))
     is_live = str(request.form.get("is_live", request.args.get("is_live", "0"))).lower() in ("1", "true")
     stream_quality = str(request.form.get("stream_quality", request.args.get("stream_quality", "high")))
+    benchmark_flag = str(request.form.get("benchmark", request.args.get("benchmark", "1"))).lower() not in ("0", "false", "no")
 
     try:
-        out = _process_bgr(bgr, os.path.basename(upload.filename), yolo_conf=yolo_conf, env_filter=env_filter, is_live=is_live, stream_quality=stream_quality)
+        if not is_live and benchmark_flag:
+            out = _run_benchmark_pipeline(
+                bgr,
+                os.path.basename(upload.filename),
+                yolo_conf=yolo_conf,
+                env_filter=env_filter,
+                stream_quality=stream_quality,
+            )
+        else:
+            out = _process_bgr(
+                bgr,
+                os.path.basename(upload.filename),
+                yolo_conf=yolo_conf,
+                env_filter=env_filter,
+                is_live=is_live,
+                stream_quality=stream_quality,
+            )
         return jsonify(sanitize_json(out))
     except Exception as e:
         traceback.print_exc()
@@ -620,7 +1162,7 @@ def env_reeval():
         return jsonify({"error": "No active image in memory"}), 400
 
     req_data = request.get_json(silent=True) or {}
-    env_filter = req_data.get("env", "normal")
+    env_filter = req_data.get("env") or req_data.get("filter") or "normal"
     yolo_conf = float(req_data.get("yolo_conf", 0.15))
 
     try:
@@ -644,78 +1186,16 @@ def yolo_reeval():
     conf = max(0.01, min(0.95, conf))
 
     try:
-        t_y_start = time.perf_counter()
-        y_res = YOLO_MODEL(LAST_BGR, conf=conf, verbose=False, device=BUNDLE.device)[0]
-        t_yolo_ms = (time.perf_counter() - t_y_start) * 1000.0
-
-        yolo_bgr = y_res.plot()
-        n_boxes = len(y_res.boxes)
-        detections_list = []
-        for b in y_res.boxes:
-            c_id = int(b.cls[0])
-            c_conf = float(b.conf[0])
-            c_name = YOLO_MODEL.names[c_id]
-            detections_list.append({
-                "class": c_name,
-                "conf": round(c_conf * 100.0, 1),
-                "xyxy": [round(float(v), 1) for v in b.xyxy[0].tolist()]
-            })
-
-        if n_boxes == 0:
-            cv2.putText(
-                yolo_bgr,
-                f"YOLOv8-Nano: 0 OBJECTS (CONF >= {int(conf * 100)}%)",
-                (20, 45),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
-                (0, 70, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                yolo_bgr,
-                "Standard COCO texture anchors missed camouflaged target",
-                (20, 75),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.48,
-                (180, 180, 200),
-                1,
-                cv2.LINE_AA,
-            )
-        else:
-            cv2.putText(
-                yolo_bgr,
-                f"YOLOv8: {n_boxes} OBJECT(S) DETECTED",
-                (20, 45),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
-                (0, 200, 255),
-                2,
-                cv2.LINE_AA,
-            )
-
-        ok_yolo, buf_yolo = cv2.imencode(".jpg", yolo_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        yolo_b64 = "data:image/jpeg;base64," + base64.b64encode(buf_yolo).decode("ascii") if ok_yolo else ""
-
-        # Dynamic YOLO Jetson Hardware Computation
-        w_orig, h_orig = LAST_BGR.shape[1], LAST_BGR.shape[0]
-        yolo_gflops = round(float(8.70 * ((w_orig * h_orig) / (640.0 * 640.0))), 2)
-        yolo_gflops = max(4.2, min(14.8, yolo_gflops))
-        yolo_pwr = round(7.60 + min(1.60, (t_yolo_ms * 0.022)) + (0.12 * min(n_boxes, 4)), 2)
-        yolo_energy_mj = round(float((yolo_gflops * 1e9 * 4.6 * 1e-12) * 1000.0), 2)
-
-        return jsonify(sanitize_json({
-            "available": True,
-            "conf_threshold": conf,
-            "boxes_count": n_boxes,
-            "detections": detections_list,
-            "latency_ms": round(t_yolo_ms, 1),
-            "power_w": yolo_pwr,
-            "energy_mj": yolo_energy_mj,
-            "gflops": yolo_gflops,
-            "status": f"{n_boxes} OBJECT(S) DETECTED" if n_boxes > 0 else f"0 OBJECTS (CONF >= {int(conf * 100)}%)",
-            "result_png": yolo_b64,
-        }))
+        live_snap = POWER_MONITOR.read_live()
+        yolo_data = _run_yolo_single(
+            LAST_BGR,
+            conf,
+            float(live_snap["watts"]),
+            None,
+            str(live_snap["source"]),
+            bool(live_snap["is_estimated"]),
+        )
+        return jsonify(sanitize_json(yolo_data))
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -724,55 +1204,80 @@ def yolo_reeval():
 # ── Edge Power Benchmark Analytics ──────────────────────────────────────────
 @app.get("/api/power_benchmark")
 def power_benchmark():
-    """Returns validated quantitative energy and battery figures based on
-    Horowitz CMOS 45nm model and empirical Jetson Nano power logs."""
-    # Horowitz 45nm CMOS: E_AC = 0.9 pJ, E_MAC = 4.6 pJ
-    # Model parameters ~ 820,417 weights. Timesteps T = 16.
+    """Returns live hardware telemetry status + latest measured session alongside
+    the theoretical Horowitz CMOS 45nm energy model."""
     e_ac_pj = 0.9
     e_mac_pj = 4.6
     n_params = 820417
     timesteps = 16
 
-    # Standard ANN (e.g. YOLOv8n) full MAC operations:
-    ann_mac_ops = 8.7e9  # 8.7 GFLOPs
-    ann_energy_mj = (ann_mac_ops * e_mac_pj * 1e-12) * 1000.0  # mJ
-
-    # SNN event-driven AC operations (with empirical 78% sparsity)
+    ann_mac_ops = 8.7e9
+    ann_energy_mj = (ann_mac_ops * e_mac_pj * 1e-12) * 1000.0
     snn_active_fraction = 0.22
     snn_synaptic_ops = n_params * timesteps * snn_active_fraction
     snn_energy_mj = (snn_synaptic_ops * e_ac_pj * 1e-12) * 1000.0
 
-    efficiency_gain = ann_energy_mj / max(1e-6, snn_energy_mj)
+    summaries = _list_session_summaries()
+    latest_summary = summaries[0] if summaries else None
+    live_snap = POWER_MONITOR.read_live()
+
+    if latest_summary:
+        p = latest_summary["phases"]
+        snn_w = p["snn_inference"]["avg_watts"]
+        yolo_w = p["yolo_inference"]["avg_watts"]
+        idle_w = p["idle_baseline"]["avg_watts"]
+        ratio = latest_summary["comparison"]["power_ratio_yolo_over_snn"]
+        reduction_str = f"{ratio}x"
+    else:
+        snn_w = live_snap["watts"]
+        yolo_w = None
+        idle_w = live_snap["watts"]
+        reduction_str = "--"
+
+    horowitz_theoretical = {
+        "horowitz_model": {
+            "e_ac_pj": e_ac_pj,
+            "e_mac_pj": e_mac_pj,
+            "mac_to_ac_energy_ratio": round(e_mac_pj / e_ac_pj, 2),
+        },
+        "theoretical_energy_per_frame": {
+            "snn_energy_mj": round(snn_energy_mj, 3),
+            "ann_energy_mj": round(ann_energy_mj, 3),
+            "energy_savings_percent": round((1.0 - (snn_energy_mj / ann_energy_mj)) * 100.0, 1),
+        },
+        "breakeven_sparsity": 62.1,
+        "measured_sparsity": 78.4,
+    }
 
     return jsonify(
-        {
-            "horowitz_model": {
-                "e_ac_pj": e_ac_pj,
-                "e_mac_pj": e_mac_pj,
-                "mac_to_ac_energy_ratio": round(e_mac_pj / e_ac_pj, 2),
-            },
-            "power_draw": {
-                "snn_core_watts": 0.91,
-                "standard_yolo_watts": 8.70,
-                "idle_standby_watts": 0.35,
-                "reduction_ratio": "9.5x",
-            },
-            "battery_autonomy": {
-                "battery_voltage": 12.0,
-                "battery_capacity_mah": 5200,
-                "total_watt_hours": 62.4,
-                "snn_runtime_hours": 34.8,
-                "ann_runtime_hours": 3.8,
-                "runtime_extension_factor": "9.2x",
-            },
-            "theoretical_energy_per_frame": {
-                "snn_energy_mj": round(snn_energy_mj, 3),
-                "ann_energy_mj": round(ann_energy_mj, 3),
-                "energy_savings_percent": round((1.0 - (snn_energy_mj / ann_energy_mj)) * 100.0, 1),
-            },
-            "breakeven_sparsity": 62.1,
-            "measured_sparsity": 78.4,
-        }
+        sanitize_json(
+            {
+                "horowitz_theoretical": horowitz_theoretical,
+                "horowitz_model": horowitz_theoretical["horowitz_model"],
+                "power_draw": {
+                    "snn_core_watts": snn_w,
+                    "standard_yolo_watts": yolo_w,
+                    "idle_standby_watts": idle_w,
+                    "reduction_ratio": reduction_str,
+                    "source": live_snap["source"],
+                    "is_estimated": live_snap["is_estimated"],
+                },
+                "battery_autonomy": {
+                    "battery_voltage": 12.0,
+                    "battery_capacity_mah": 5200,
+                    "total_watt_hours": 62.4,
+                    "snn_runtime_hours": round(62.4 / snn_w, 1) if snn_w and snn_w > 0 else 0.0,
+                    "ann_runtime_hours": round(62.4 / yolo_w, 1) if yolo_w and yolo_w > 0 else 0.0,
+                    "runtime_extension_factor": reduction_str,
+                },
+                "theoretical_energy_per_frame": horowitz_theoretical["theoretical_energy_per_frame"],
+                "breakeven_sparsity": 62.1,
+                "measured_sparsity": 78.4,
+                "hardware_telemetry": POWER_MONITOR.get_capabilities(),
+                "latest_live": live_snap,
+                "latest_session": latest_summary,
+            }
+        )
     )
 
 
@@ -837,7 +1342,6 @@ def too_large(_):
     return jsonify({"error": f"File exceeds the {MAX_UPLOAD_MB} MB limit."}), 413
 
 # ── Intel RealSense D435i Live Integration ──────────────────────────────────
-import threading as _threading
 try:
     import pyrealsense2 as rs
     _RS_AVAILABLE = True
@@ -846,7 +1350,7 @@ except ImportError:
     _RS_AVAILABLE = False
 
 _rs_pipeline = None
-_rs_lock = _threading.Lock()
+_rs_lock = threading.Lock()
 
 
 def _get_rs_pipeline():
@@ -926,5 +1430,15 @@ def realsense_stream():
 
 
 if __name__ == "__main__":
-    print(f"\n  [SERVER READY] Open in browser or desktop app mode: http://{HOST}:{PORT}\n")
-    app.run(host=HOST, port=PORT, debug=False, threaded=True)
+    print(f"\n  [SERVER READY] Open in browser or desktop app mode: http://{HOST}:{PORT}")
+    print(f"  [WS ENDPOINT]  Live hardware telemetry stream: ws://{HOST}:{PORT}/ws/power\n")
+    try:
+        app.run(
+            host=HOST,
+            port=PORT,
+            debug=False,
+            threaded=True,
+            request_handler=NeuroCamoRequestHandler,
+        )
+    finally:
+        POWER_MONITOR.close()
